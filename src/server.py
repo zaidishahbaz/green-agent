@@ -24,16 +24,18 @@ def main():
     # See: https://a2a-protocol.org/latest/tutorials/python/3-agent-skills-and-card/
     
     skill = AgentSkill(
-        id="",
-        name="",
-        description="",
-        tags=[],
-        examples=[]
+        id='swebench_evaluator',
+        name='SWE-bench Verified Evaluator',
+        description='Pulls tasks from SWE-bench Verified dataset and sends them to a solver agent for evaluation',
+        tags=['benchmark', 'swebench', 'evaluation'],
+        examples=[
+            '{"participants": {"solver": "http://localhost:9010/"}, "config": {"max_tasks": 1}}',
+        ],
     )
 
     agent_card = AgentCard(
-        name="",
-        description="",
+        name="SWE-bench Green Agent",
+        description="Green agent that orchestrates SWE-bench Verified benchmark evaluation by pulling tasks and coordinating with solver agents",
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version='1.0.0',
         default_input_modes=['text'],
