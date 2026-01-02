@@ -1,0 +1,25 @@
+# SWE-bench Evaluation Scenario
+#
+# Green Agent: Pulls tasks from SWE-bench Verified, validates patches in Docker
+# Purple Agent: Solves coding tasks using LLM
+#
+# Usage: uv run python src/run_scenario.py scenarios/swebench/scenario.toml
+#        uv run python src/run_scenario.py scenarios/swebench/scenario.toml --serve-only
+
+[green]
+url = "http://localhost:9009"
+command = "uv run python -m server"
+cwd = "../.."  # green-agent root
+
+[participants.solver]
+url = "http://localhost:9010"
+command = "uv run python -m server"
+cwd = "/Users/zaidishahbaz/Desktop/side/agentsbeat/purple-swebench"
+
+[config]
+# Evaluation configuration passed to the green agent
+max_tasks = 1
+# Optional filters:
+# instance_id = "django__django-11099"  # Specific task
+# repo = "django/django"                 # Filter by repo
+# difficulty = "easy"                    # Filter by difficulty

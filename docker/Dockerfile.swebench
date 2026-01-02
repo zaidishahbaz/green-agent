@@ -1,0 +1,33 @@
+# SWE-bench Test Execution Container
+# This Dockerfile is used as a base for running SWE-bench task validation
+#
+# Build with repo-specific args:
+#   docker build -f docker/Dockerfile.swebench \
+#     --build-arg REPO=django/django \
+#     --build-arg PYTHON_VERSION=3.9 \
+#     -t swebench-django .
+
+ARG PYTHON_VERSION=3.11
+
+FROM python:${PYTHON_VERSION}-slim-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /workspace
+
+# Install pytest and common test dependencies
+RUN pip install --no-cache-dir pytest pytest-xdist pytest-timeout
+
+# Copy the test runner script
+COPY docker/run_tests.py /usr/local/bin/run_tests.py
+RUN chmod +x /usr/local/bin/run_tests.py
+
+# Default entry point - expects task JSON as input
+ENTRYPOINT ["python", "/usr/local/bin/run_tests.py"]
