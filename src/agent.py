@@ -7,6 +7,7 @@ from a2a.utils import get_message_text, new_agent_text_message
 
 from messenger import Messenger
 from swebench import SWEBenchDataset, SWEBenchTask
+from docker_validator import DockerValidator
 
 
 class EvalRequest(BaseModel):
@@ -45,6 +46,7 @@ class Agent:
     def __init__(self):
         self.messenger = Messenger()
         self.dataset = SWEBenchDataset()
+        self.docker_validator = DockerValidator()
 
     def validate_request(self, request: EvalRequest) -> tuple[bool, str]:
         missing_roles = set(self.required_roles) - set(request.participants.keys())
@@ -76,6 +78,58 @@ class Agent:
         # Apply max_tasks limit
         max_tasks = config.get("max_tasks", 1)
         return tasks[:max_tasks]
+
+    def extract_patch(self, solver_response: str) -> str | None:
+        """Extract patch from solver response.
+
+        The solver response may contain:
+        1. Raw diff content
+        2. JSON with a 'patch' field
+        3. Markdown code block with diff
+        """
+        if not solver_response:
+            return None
+
+        # Try parsing as JSON first
+        try:
+            data = json.loads(solver_response)
+            if isinstance(data, dict) and "patch" in data:
+                return data["patch"]
+        except json.JSONDecodeError:
+            pass
+
+        # Check if it's a raw diff
+        if solver_response.strip().startswith("diff --git"):
+            return solver_response.strip()
+
+        # Try to extract from markdown code block
+        import re
+        match = re.search(r'```(?:diff)?\s*(diff --git[\s\S]*?)```', solver_response)
+        if match:
+            return match.group(1).strip()
+
+        return None
+
+    async def validate_patch(
+        self, task: SWEBenchTask, patch: str, updater: TaskUpdater
+    ) -> dict[str, Any]:
+        """Validate a patch using Docker container."""
+        await updater.update_status(
+            TaskState.working,
+            new_agent_text_message(f"Validating patch for {task.instance_id}...")
+        )
+
+        result = self.docker_validator.validate_task(task, patch)
+
+        return {
+            "patch_applied": result.patch_applied,
+            "install_success": result.install_success,
+            "tests_passed": result.tests_passed,
+            "tests_failed": result.tests_failed,
+            "score": result.score,
+            "errors": result.errors,
+            "test_details": result.test_results,
+        }
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
         """Run SWE-bench evaluation.
@@ -138,6 +192,11 @@ class Agent:
 
             # Create message for solver
             task_message = TaskMessage.from_task(task)
+            result_entry = {
+                "instance_id": task.instance_id,
+                "repo": task.repo,
+                "fail_to_pass": task.fail_to_pass,
+            }
 
             try:
                 # Send task to solver agent
@@ -145,34 +204,65 @@ class Agent:
                     task_message.model_dump_json(),
                     solver_url
                 )
+                result_entry["solver_response"] = response
 
-                results.append({
-                    "instance_id": task.instance_id,
-                    "repo": task.repo,
-                    "status": "completed",
-                    "solver_response": response,
-                    "expected_patch": task.patch,
-                    "fail_to_pass": task.fail_to_pass,
-                })
+                # Extract patch from solver response
+                patch = self.extract_patch(response)
+
+                if patch:
+                    # Validate the patch using Docker
+                    validation = await self.validate_patch(task, patch, updater)
+                    result_entry["patch"] = patch
+                    result_entry["validation"] = validation
+                    result_entry["status"] = "validated"
+                    result_entry["score"] = validation["score"]
+                else:
+                    result_entry["status"] = "no_patch"
+                    result_entry["score"] = 0.0
+                    result_entry["error"] = "Could not extract patch from solver response"
+
             except Exception as e:
-                results.append({
-                    "instance_id": task.instance_id,
-                    "repo": task.repo,
-                    "status": "error",
-                    "error": str(e),
-                })
+                result_entry["status"] = "error"
+                result_entry["score"] = 0.0
+                result_entry["error"] = str(e)
+
+            results.append(result_entry)
 
         # Summary
-        completed = sum(1 for r in results if r["status"] == "completed")
-        failed = sum(1 for r in results if r["status"] == "error")
+        validated = sum(1 for r in results if r["status"] == "validated")
+        no_patch = sum(1 for r in results if r["status"] == "no_patch")
+        errors = sum(1 for r in results if r["status"] == "error")
+        total_score = sum(r.get("score", 0.0) for r in results)
+        avg_score = total_score / len(results) if results else 0.0
+
+        # Count tests passed across all validated results
+        tests_passed = sum(
+            r.get("validation", {}).get("tests_passed", 0)
+            for r in results if r["status"] == "validated"
+        )
+        tests_failed = sum(
+            r.get("validation", {}).get("tests_failed", 0)
+            for r in results if r["status"] == "validated"
+        )
+
+        summary_text = (
+            f"Evaluation complete:\n"
+            f"- Tasks: {len(results)} total, {validated} validated, {no_patch} no patch, {errors} errors\n"
+            f"- Tests: {tests_passed} passed, {tests_failed} failed\n"
+            f"- Average score: {avg_score:.2%}"
+        )
 
         await updater.add_artifact(
             parts=[
-                Part(root=TextPart(text=f"Evaluation complete: {completed}/{len(results)} tasks completed, {failed} errors")),
+                Part(root=TextPart(text=summary_text)),
                 Part(root=DataPart(data={
                     "total_tasks": len(results),
-                    "completed": completed,
-                    "failed": failed,
+                    "validated": validated,
+                    "no_patch": no_patch,
+                    "errors": errors,
+                    "tests_passed": tests_passed,
+                    "tests_failed": tests_failed,
+                    "average_score": avg_score,
                     "results": results,
                 }))
             ],

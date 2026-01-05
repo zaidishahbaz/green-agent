@@ -2,7 +2,7 @@ from typing import Any
 import pytest
 import httpx
 from uuid import uuid4
-
+import json
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types import Message, Part, Role, TextPart
 
@@ -196,4 +196,103 @@ async def test_message(agent, streaming):
     assert events, "Agent should respond with at least one event"
     assert not all_errors, f"Message validation failed:\n" + "\n".join(all_errors)
 
-# Add your custom tests here
+# SWE-bench specific tests
+
+
+
+def get_eval_request(solver_url: str, config: dict | None = None) -> str:
+    """Create an EvalRequest JSON string."""
+    request = {
+        "participants": {"solver": solver_url},
+        "config": config or {"max_tasks": 1}
+    }
+    return json.dumps(request)
+
+
+@pytest.mark.asyncio
+async def test_swebench_with_solver(agent, solver, agent_card, solver_card):
+    """Test SWE-bench evaluation with a solver agent."""
+    if solver is None:
+        pytest.skip("Solver agent not available (start Purple Agent on port 9010)")
+
+    # Verify agent card has SWE-bench skill
+    skill_ids = [s.get("id") for s in agent_card.get("skills", [])]
+    assert "swebench_evaluator" in skill_ids, "Agent should have swebench_evaluator skill"
+
+    # Send evaluation request
+    request = get_eval_request(solver, {"max_tasks": 1})
+    events = await send_text_message(request, agent, streaming=False)
+
+    assert events, "Agent should respond with events"
+
+    # Check for successful completion
+    for event in events:
+        match event:
+            case (task, update):
+                status = task.status.state.value
+                assert status in ["completed", "working"], f"Task status should be completed or working, got {status}"
+
+
+@pytest.mark.asyncio
+async def test_swebench_missing_solver(agent):
+    """Test that agent properly rejects request without solver participant."""
+    request = json.dumps({
+        "participants": {},  # Missing solver
+        "config": {"max_tasks": 1}
+    })
+
+    events = await send_text_message(request, agent, streaming=False)
+
+    assert events, "Agent should respond with events"
+
+    # Should be rejected due to missing solver
+    for event in events:
+        match event:
+            case (task, update):
+                status = task.status.state.value
+                assert status == "rejected", f"Task should be rejected without solver, got {status}"
+
+
+@pytest.mark.asyncio
+async def test_swebench_invalid_request(agent):
+    """Test that agent properly rejects invalid request format."""
+    events = await send_text_message("not a valid json request", agent, streaming=False)
+
+    assert events, "Agent should respond with events"
+
+    # Should be rejected due to invalid format
+    for event in events:
+        match event:
+            case (task, update):
+                status = task.status.state.value
+                assert status == "rejected", f"Task should be rejected for invalid request, got {status}"
+
+
+@pytest.mark.asyncio
+async def test_swebench_specific_task(agent, solver):
+    """Test evaluation of a specific SWE-bench task."""
+    if solver is None:
+        pytest.skip("Solver agent not available")
+
+    # Request a specific task by instance_id
+    request = get_eval_request(solver, {
+        "instance_id": "django__django-11099",
+        "max_tasks": 1
+    })
+
+    events = await send_text_message(request, agent, streaming=False)
+
+    assert events, "Agent should respond with events"
+
+    # Verify we got results
+    found_artifact = False
+    for event in events:
+        match event:
+            case (task, update):
+                if task.artifacts:
+                    found_artifact = True
+                    # Check artifact has results
+                    for artifact in task.artifacts:
+                        assert artifact.parts, "Artifact should have parts"
+
+    assert found_artifact, "Response should include result artifacts"
