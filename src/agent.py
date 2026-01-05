@@ -12,12 +12,14 @@ from docker_validator import DockerValidator
 
 class EvalRequest(BaseModel):
     """Request format sent by the AgentBeats platform to green agents."""
+
     participants: dict[str, HttpUrl]  # role -> agent URL
     config: dict[str, Any]
 
 
 class TaskMessage(BaseModel):
     """Message format sent to the solver agent."""
+
     instance_id: str
     repo: str
     base_commit: str
@@ -38,6 +40,23 @@ class TaskMessage(BaseModel):
             fail_to_pass=task.fail_to_pass,
         )
 
+    @property
+    def agent_prompt(self) -> str:
+        # Building minimal, fair and objective system prompt. Currently, 0 shot.
+        # TODO: Add support for bash commands. Add prompt for json output
+
+        return f"""Issue:
+{self.problem_statement}
+
+Additional context from issue discussion:
+{'N/A' if not self.hints_text else self.hints_text}
+
+Task:
+Provide a unified diff that fixes the issue.
+The diff must apply cleanly to the current codebase.
+Output only the diff. Do not include explanations.
+"""
+
 
 class Agent:
     required_roles: list[str] = ["solver"]
@@ -53,7 +72,9 @@ class Agent:
         if missing_roles:
             return False, f"Missing roles: {missing_roles}"
 
-        missing_config_keys = set(self.required_config_keys) - set(request.config.keys())
+        missing_config_keys = set(self.required_config_keys) - set(
+            request.config.keys()
+        )
         if missing_config_keys:
             return False, f"Missing config keys: {missing_config_keys}"
 
@@ -79,6 +100,9 @@ class Agent:
         max_tasks = config.get("max_tasks", 1)
         return tasks[:max_tasks]
 
+    # TODO: Remove the keyword 'patch' and instead communicate through
+    # the a2a level names, such as 'respond' or 'input-requested' when
+    # requesting tool use via bash scripts
     def extract_patch(self, solver_response: str) -> str | None:
         """Extract patch from solver response.
 
@@ -87,6 +111,7 @@ class Agent:
         2. JSON with a 'patch' field
         3. Markdown code block with diff
         """
+
         if not solver_response:
             return None
 
@@ -104,7 +129,8 @@ class Agent:
 
         # Try to extract from markdown code block
         import re
-        match = re.search(r'```(?:diff)?\s*(diff --git[\s\S]*?)```', solver_response)
+
+        match = re.search(r"```(?:diff)?\s*(diff --git[\s\S]*?)```", solver_response)
         if match:
             return match.group(1).strip()
 
@@ -116,7 +142,7 @@ class Agent:
         """Validate a patch using Docker container."""
         await updater.update_status(
             TaskState.working,
-            new_agent_text_message(f"Validating patch for {task.instance_id}...")
+            new_agent_text_message(f"Validating patch for {task.instance_id}..."),
         )
 
         result = self.docker_validator.validate_task(task, patch)
@@ -162,7 +188,7 @@ class Agent:
         # Load dataset
         await updater.update_status(
             TaskState.working,
-            new_agent_text_message("Loading SWE-bench Verified dataset...")
+            new_agent_text_message("Loading SWE-bench Verified dataset..."),
         )
 
         try:
@@ -174,12 +200,14 @@ class Agent:
         # Get tasks based on config
         tasks = self.get_tasks(request.config)
         if not tasks:
-            await updater.failed(new_agent_text_message("No tasks found matching criteria"))
+            await updater.failed(
+                new_agent_text_message("No tasks found matching criteria")
+            )
             return
 
         await updater.update_status(
             TaskState.working,
-            new_agent_text_message(f"Found {len(tasks)} task(s) to evaluate")
+            new_agent_text_message(f"Found {len(tasks)} task(s) to evaluate"),
         )
 
         results = []
@@ -187,11 +215,15 @@ class Agent:
         for i, task in enumerate(tasks):
             await updater.update_status(
                 TaskState.working,
-                new_agent_text_message(f"[{i+1}/{len(tasks)}] Sending task {task.instance_id} to solver...")
+                new_agent_text_message(
+                    f"[{i+1}/{len(tasks)}] Sending task {task.instance_id} to solver..."
+                ),
             )
 
             # Create message for solver
             task_message = TaskMessage.from_task(task)
+            prompt_for_purple_agent = task_message.agent_prompt
+
             result_entry = {
                 "instance_id": task.instance_id,
                 "repo": task.repo,
@@ -200,14 +232,17 @@ class Agent:
 
             try:
                 # Send task to solver agent
+                # response = await self.messenger.talk_to_agent(
+                #     task_message.model_dump_json(), solver_url
+                # )
                 response = await self.messenger.talk_to_agent(
-                    task_message.model_dump_json(),
-                    solver_url
+                    prompt_for_purple_agent, solver_url
                 )
                 result_entry["solver_response"] = response
 
                 # Extract patch from solver response
                 patch = self.extract_patch(response)
+                print("extracted patch > ", patch)
 
                 if patch:
                     # Validate the patch using Docker
@@ -215,11 +250,13 @@ class Agent:
                     result_entry["patch"] = patch
                     result_entry["validation"] = validation
                     result_entry["status"] = "validated"
-                    result_entry["score"] = validation["score"]
+                    result_entry["score"] = validation["score"] if "score" in validation else 0.0
                 else:
                     result_entry["status"] = "no_patch"
                     result_entry["score"] = 0.0
-                    result_entry["error"] = "Could not extract patch from solver response"
+                    result_entry["error"] = (
+                        "Could not extract patch from solver response"
+                    )
 
             except Exception as e:
                 result_entry["status"] = "error"
@@ -238,11 +275,13 @@ class Agent:
         # Count tests passed across all validated results
         tests_passed = sum(
             r.get("validation", {}).get("tests_passed", 0)
-            for r in results if r["status"] == "validated"
+            for r in results
+            if r["status"] == "validated"
         )
         tests_failed = sum(
             r.get("validation", {}).get("tests_failed", 0)
-            for r in results if r["status"] == "validated"
+            for r in results
+            if r["status"] == "validated"
         )
 
         summary_text = (
@@ -255,16 +294,20 @@ class Agent:
         await updater.add_artifact(
             parts=[
                 Part(root=TextPart(text=summary_text)),
-                Part(root=DataPart(data={
-                    "total_tasks": len(results),
-                    "validated": validated,
-                    "no_patch": no_patch,
-                    "errors": errors,
-                    "tests_passed": tests_passed,
-                    "tests_failed": tests_failed,
-                    "average_score": avg_score,
-                    "results": results,
-                }))
+                Part(
+                    root=DataPart(
+                        data={
+                            "total_tasks": len(results),
+                            "validated": validated,
+                            "no_patch": no_patch,
+                            "errors": errors,
+                            "tests_passed": tests_passed,
+                            "tests_failed": tests_failed,
+                            "average_score": avg_score,
+                            "results": results,
+                        }
+                    )
+                ),
             ],
             name="SWE-bench Evaluation Results",
         )
