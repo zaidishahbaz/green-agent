@@ -31,7 +31,7 @@ def create_message(
         context_id=context_id,
     )
 
-
+# TODO: Do we need to merge parts??
 def merge_parts(parts: list[Part]) -> str:
     chunks = []
     for part in parts:
@@ -65,7 +65,7 @@ async def send_message(
 
         outbound_msg = create_message(text=message, context_id=context_id)
         last_event = None
-        outputs = {"response": "", "context_id": None}
+        outputs = {"action": "", "content": "", "context_id": None}
 
         # if streaming == False, only one event is generated
         async for event in client.send_message(outbound_msg):
@@ -74,17 +74,18 @@ async def send_message(
         match last_event:
             case Message() as msg:
                 outputs["context_id"] = msg.context_id
-                outputs["response"] += merge_parts(msg.parts)
+                outputs["content"] += merge_parts(msg.parts)
 
             case (task, update):
                 outputs["context_id"] = task.context_id
                 outputs["status"] = task.status.state.value
                 msg = task.status.message
                 if msg:
-                    outputs["response"] += merge_parts(msg.parts)
-                if task.artifacts:
+                    outputs["content"] += merge_parts(msg.parts)
+                if task.artifacts: # TODO: Shouldn't there be only 1 artifact per message
                     for artifact in task.artifacts:
-                        outputs["response"] += merge_parts(artifact.parts)
+                        outputs["content"] += merge_parts(artifact.parts)
+                        outputs["action"] = artifact.name
 
             case _:
                 pass
@@ -124,7 +125,7 @@ class Messenger:
         if outputs.get("status", "completed") != "completed":
             raise RuntimeError(f"{url} responded with: {outputs}")
         self._context_ids[url] = outputs.get("context_id", None)
-        return outputs["response"]
+        return outputs
 
     def reset(self):
         self._context_ids = {}
