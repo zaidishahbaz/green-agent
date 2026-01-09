@@ -45,16 +45,39 @@ class TaskMessage(BaseModel):
         # Building minimal, fair and objective system prompt. Currently, 0 shot.
         # TODO: Add support for bash commands. Add prompt for json output
 
-        return f"""Issue:
+        return f"""You are a software-fixing agent. You are working on a repository to fix a bug.
+
+You may respond in one of two ways:
+
+1. Bash commands to explore or fetch context:
+   - Format: {{"action": "bash", "content": "<your shell command>"}}
+   - Example: {{"action": "bash", "content": "ls sklearn/metrics"}}
+   - Outputs from the command will be returned to you.
+   - Only read-only commands are allowed; do not modify files yet.
+
+2. Final patch to submit a fix:
+   - Format: {{"action": "patch", "content": "<unified diff>"}}
+   - Example: {{"action": "patch", "content": "--- a/foo.py\n+++ b/foo.py\n@@ ..."}}
+   - You may generate the patch as a minimal diff; it will be executed for you.
+
+You must output exactly ONE JSON object per response.
+The JSON object must contain exactly ONE action.
+Do not return arrays, multiple JSON objects, or additional text.
+If you need to take multiple steps, wait for the next turn.
+
+Task:
+You may alternate between Bash commands and reading outputs as needed. 
+When you are confident in your fix, submit a patch. 
+Do not perform arbitrary operations outside these formats.
+Do not include any explanations.
+
+Here are the Issue Details:
+
+Issue:
 {self.problem_statement}
 
 Additional context from issue discussion:
 {'N/A' if not self.hints_text else self.hints_text}
-
-Task:
-Provide a unified diff that fixes the issue.
-The diff must apply cleanly to the current codebase.
-Output only the diff. Do not include explanations.
 """
 
 
@@ -117,9 +140,8 @@ class Agent:
 
         # Try parsing as JSON first
         try:
-            data = json.loads(solver_response)
-            if isinstance(data, dict) and "patch" in data:
-                return data["patch"]
+            if isinstance(solver_response, dict) and "action" in solver_response and solver_response["action"] == "patch":
+                return solver_response["content"]
         except json.JSONDecodeError:
             pass
 
@@ -238,7 +260,7 @@ class Agent:
                 response = await self.messenger.talk_to_agent(
                     prompt_for_purple_agent, solver_url
                 )
-                result_entry["solver_response"] = response
+                result_entry["solver_response"] = response["content"]
 
                 # Extract patch from solver response
                 patch = self.extract_patch(response)
