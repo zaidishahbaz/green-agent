@@ -7,7 +7,83 @@ from pathlib import Path
 
 
 # Python version mapping for SWE-bench repositories
-# Based on the version field in the dataset
+# Based on official SWE-bench harness constants:
+# https://github.com/swe-bench/SWE-bench/blob/main/swebench/harness/constants/python.py
+
+def get_python_version(repo: str, version: str) -> str:
+    """
+    Get the appropriate Python version for a repo/version combination.
+    Based on official SWE-bench harness specifications.
+    """
+    # Parse version to float for comparison (e.g., "4.2" -> 4.2)
+    try:
+        ver = float(version)
+    except (ValueError, TypeError):
+        ver = 0.0
+
+    if repo == "django/django":
+        if ver < 3.0:
+            return "3.5"
+        elif ver < 4.0:
+            return "3.6"
+        elif ver < 4.1:
+            return "3.8"
+        elif ver < 5.0:
+            return "3.9"
+        else:
+            return "3.11"
+
+    elif repo == "astropy/astropy":
+        if ver < 3.0:
+            return "3.6"
+        elif ver < 5.3:
+            return "3.9"
+        else:
+            return "3.10"
+
+    elif repo == "matplotlib/matplotlib":
+        if ver < 3.0:
+            return "3.5"
+        elif ver < 3.1:
+            return "3.7"
+        elif ver < 3.5:
+            return "3.8"
+        else:
+            return "3.11"
+
+    elif repo == "scikit-learn/scikit-learn":
+        if ver < 1.0:
+            return "3.6"
+        else:
+            return "3.9"
+
+    elif repo == "pallets/flask":
+        if ver < 2.1:
+            return "3.9"
+        elif ver < 2.2:
+            return "3.10"
+        else:
+            return "3.11"
+
+    elif repo == "pydata/xarray":
+        return "3.10"
+
+    # Default Python 3.9 for these repos (all versions)
+    elif repo in (
+        "pytest-dev/pytest",
+        "sympy/sympy",
+        "sphinx-doc/sphinx",
+        "psf/requests",
+        "mwaskom/seaborn",
+        "pylint-dev/pylint",
+    ):
+        return "3.9"
+
+    # Fallback
+    return "3.9"
+
+
+# Legacy mapping for backward compatibility (uses Python 3.9 for all)
 REPO_PYTHON_VERSIONS = {
     "astropy/astropy": "3.9",
     "django/django": "3.9",
@@ -15,7 +91,7 @@ REPO_PYTHON_VERSIONS = {
     "mwaskom/seaborn": "3.9",
     "pallets/flask": "3.9",
     "psf/requests": "3.9",
-    "pydata/xarray": "3.9",
+    "pydata/xarray": "3.10",
     "pylint-dev/pylint": "3.9",
     "pytest-dev/pytest": "3.9",
     "scikit-learn/scikit-learn": "3.9",
@@ -108,6 +184,8 @@ class DockerValidator:
         tests: list[str],
         timeout: int = 600,
         timeout_per_test: int = 120,
+        environment_setup_commit: str | None = None,
+        version: str | None = None,
     ) -> DockerTestResult:
         """
         Run validation in a Docker container.
@@ -115,17 +193,22 @@ class DockerValidator:
         Args:
             instance_id: Task identifier
             repo: Repository (e.g., "django/django")
-            base_commit: Commit hash to checkout
+            base_commit: Commit hash to checkout for evaluation
             patch: Git diff patch to apply
             tests: List of test identifiers to run
             timeout: Overall timeout for the container
             timeout_per_test: Timeout per individual test
+            environment_setup_commit: Commit hash for installing dependencies (optional)
+            version: Package version string for Python version selection (optional)
 
         Returns:
             DockerTestResult
         """
-        # Determine Python version for this repo
-        python_version = REPO_PYTHON_VERSIONS.get(repo, "3.9")
+        # Determine Python version for this repo/version combination
+        if version:
+            python_version = get_python_version(repo, version)
+        else:
+            python_version = REPO_PYTHON_VERSIONS.get(repo, "3.9")
 
         # Ensure image exists
         success, error = self.ensure_image(python_version)
@@ -140,6 +223,7 @@ class DockerValidator:
             "instance_id": instance_id,
             "repo": repo,
             "base_commit": base_commit,
+            "environment_setup_commit": environment_setup_commit or base_commit,
             "patch": patch,
             "tests": tests,
             "timeout_per_test": timeout_per_test,
@@ -217,4 +301,6 @@ class DockerValidator:
             patch=patch,
             tests=task.fail_to_pass,
             timeout=timeout,
+            environment_setup_commit=task.environment_setup_commit,
+            version=task.version,
         )
