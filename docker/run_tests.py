@@ -193,6 +193,17 @@ def run_test(test_name, repo_dir, timeout=120):
     }
 
 
+def checkout_commit(commit, repo_dir):
+    """Checkout a specific commit."""
+    code, stdout, stderr = run_command(
+        ["git", "checkout", "--quiet", commit],
+        cwd=repo_dir
+    )
+    if code != 0:
+        return False, f"Checkout failed: {stderr}"
+    return True, ""
+
+
 def main():
     # Read task from stdin
     try:
@@ -205,6 +216,7 @@ def main():
     instance_id = task.get("instance_id", "unknown")
     repo = task.get("repo")
     base_commit = task.get("base_commit")
+    environment_setup_commit = task.get("environment_setup_commit", base_commit)
     patch = task.get("patch", "")
     tests = task.get("tests", [])
     timeout_per_test = task.get("timeout_per_test", 120)
@@ -226,14 +238,30 @@ def main():
     if workspace.exists():
         shutil.rmtree(workspace)
 
-    # Step 1: Clone repo
-    success, error = clone_repo(repo, base_commit, workspace)
+    # Step 1: Clone repo at environment_setup_commit (for installing dependencies)
+    success, error = clone_repo(repo, environment_setup_commit, workspace)
     if not success:
         result["errors"].append(f"Clone: {error}")
         print(json.dumps(result))
         sys.exit(0)
 
-    # Step 2: Apply patch
+    # Step 2: Install dependencies at environment_setup_commit
+    success, error = install_dependencies(workspace)
+    if not success:
+        result["errors"].append(f"Install: {error}")
+        # Continue anyway, some tests might work
+    else:
+        result["install_success"] = True
+
+    # Step 3: Checkout to base_commit for evaluation
+    if environment_setup_commit != base_commit:
+        success, error = checkout_commit(base_commit, workspace)
+        if not success:
+            result["errors"].append(f"Checkout base_commit: {error}")
+            print(json.dumps(result))
+            sys.exit(0)
+
+    # Step 4: Apply patch
     if patch:
         success, error = apply_patch(patch, workspace)
         if not success:
@@ -244,15 +272,7 @@ def main():
     else:
         result["patch_applied"] = True  # No patch needed
 
-    # Step 3: Install dependencies
-    success, error = install_dependencies(workspace)
-    if not success:
-        result["errors"].append(f"Install: {error}")
-        # Continue anyway, some tests might work
-    else:
-        result["install_success"] = True
-
-    # Step 4: Run tests
+    # Step 5: Run tests
     for test in tests:
         test_result = run_test(test, workspace, timeout=timeout_per_test)
         result["test_results"][test] = test_result
