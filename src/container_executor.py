@@ -216,7 +216,7 @@ class ContainerExecutor:
             await self.stop()
             return False, f"Clone failed: {clone_result.stderr}"
 
-        # Checkout environment_setup_commit for dependency installation
+        # Checkout environment_setup_commit to get requirements files
         checkout_result = self._exec_in_container(
             f"git checkout --quiet {task.environment_setup_commit}",
             timeout=60
@@ -225,11 +225,14 @@ class ContainerExecutor:
             await self.stop()
             return False, f"Checkout environment_setup_commit failed: {checkout_result.stderr}"
 
-        # Install dependencies
-        install_result = self._install_dependencies()
-        if not install_result.success:
-            # Continue anyway - some tests might work
-            print(f"Warning: Dependency installation failed: {install_result.stderr}")
+        # Copy requirements files to temp location before switching commits
+        self._exec_in_container("mkdir -p /tmp/env_reqs", timeout=10)
+        for req_file in ["requirements.txt", "requirements-dev.txt", "test-requirements.txt",
+                         "requirements_dev.txt", "environment.yml", "environment.yaml"]:
+            self._exec_in_container(
+                f"cp {REPO_ROOT}/{req_file} /tmp/env_reqs/ 2>/dev/null || true",
+                timeout=10
+            )
 
         # Checkout to base_commit for evaluation
         if task.environment_setup_commit != task.base_commit:
@@ -240,6 +243,16 @@ class ContainerExecutor:
             if not checkout_result.success:
                 await self.stop()
                 return False, f"Checkout base_commit failed: {checkout_result.stderr}"
+
+        # Install external dependencies from saved requirements files
+        install_result = self._install_external_dependencies()
+        if not install_result.success:
+            print(f"Warning: External dependency installation failed: {install_result.stderr}")
+
+        # Install the package itself at base_commit
+        pkg_install_result = self._install_package()
+        if not pkg_install_result.success:
+            print(f"Warning: Package installation failed: {pkg_install_result.stderr}")
 
         # Create .agent_temp directory for agent scratch space
         self._exec_in_container(f"mkdir -p {AGENT_TEMP_DIR}", timeout=10)
@@ -270,7 +283,7 @@ class ContainerExecutor:
                     if write_proc.returncode == 0:
                         # Apply the test patch
                         apply_result = self._exec_in_container(
-                            f"cd {REPO_ROOT} && git apply --verbose {AGENT_TEMP_DIR}/test_patch.diff",
+                            f"cd {REPO_ROOT} && git apply --whitespace=fix --ignore-whitespace --verbose {AGENT_TEMP_DIR}/test_patch.diff",
                             timeout=60
                         )
                         if not apply_result.success:
@@ -292,9 +305,36 @@ class ContainerExecutor:
         self._started = True
         return True, ""
 
-    def _install_dependencies(self) -> BashResult:
-        """Install dependencies in the container."""
-        # Try different installation methods
+    def _install_external_dependencies(self) -> BashResult:
+        """Install external dependencies from saved requirements files."""
+        # Install from requirements files saved from environment_setup_commit
+        req_files = ["requirements.txt", "requirements-dev.txt", "test-requirements.txt", "requirements_dev.txt"]
+        installed = False
+
+        for req_file in req_files:
+            check_result = self._exec_in_container(f"test -f /tmp/env_reqs/{req_file}", timeout=10)
+            if check_result.success:
+                result = self._exec_in_container(
+                    f"pip install -r /tmp/env_reqs/{req_file} -q",
+                    timeout=600
+                )
+                if result.success:
+                    installed = True
+                    print(f"[Container] Installed dependencies from {req_file}")
+
+        if installed:
+            return BashResult(cwd=self.cwd, stdout="", stderr="", success=True)
+
+        return BashResult(
+            cwd=self.cwd,
+            stdout="",
+            stderr="No requirements files found",
+            success=False
+        )
+
+    def _install_package(self) -> BashResult:
+        """Install the package itself in editable mode at current commit."""
+        # Try different installation methods for the package
         install_commands = [
             "pip install -e . -q 2>/dev/null",
             "pip install -e .[dev] -q 2>/dev/null",
@@ -304,24 +344,13 @@ class ContainerExecutor:
         for cmd in install_commands:
             result = self._exec_in_container(cmd, timeout=600)
             if result.success:
+                print(f"[Container] Package installed with: {cmd}")
                 return result
-
-        # Try requirements files
-        req_files = ["requirements.txt", "requirements-dev.txt", "test-requirements.txt"]
-        for req_file in req_files:
-            check_result = self._exec_in_container(f"test -f {req_file}", timeout=10)
-            if check_result.success:
-                result = self._exec_in_container(
-                    f"pip install -r {req_file} -q",
-                    timeout=600
-                )
-                if result.success:
-                    return result
 
         return BashResult(
             cwd=self.cwd,
             stdout="",
-            stderr="Could not install dependencies",
+            stderr="Could not install package",
             success=False
         )
 
@@ -666,16 +695,23 @@ class ContainerExecutor:
                 error="Failed to write patch"
             )
 
-        # Try to apply patch
+        # Try to apply patch with multiple fallback strategies
         apply_result = self._exec_in_container(
-            f"cd {REPO_ROOT} && git apply --verbose {patch_file}",
+            f"cd {REPO_ROOT} && git apply --whitespace=fix --ignore-whitespace --verbose {patch_file}",
             timeout=60
         )
 
         if not apply_result.success:
-            # Try with --3way
+            # Try with --3way for merge conflicts
             apply_result = self._exec_in_container(
-                f"cd {REPO_ROOT} && git apply --3way {patch_file}",
+                f"cd {REPO_ROOT} && git apply --whitespace=fix --ignore-whitespace --3way {patch_file}",
+                timeout=60
+            )
+
+        if not apply_result.success:
+            # Fallback to patch command which is more lenient
+            apply_result = self._exec_in_container(
+                f"cd {REPO_ROOT} && patch -p1 --ignore-whitespace < {patch_file}",
                 timeout=60
             )
 

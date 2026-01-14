@@ -282,6 +282,7 @@ class DockerValidator:
         task,  # SWEBenchTask
         patch: str,
         timeout: int = 600,
+        include_pass_to_pass: bool = True,
     ) -> DockerTestResult:
         """
         Validate a patch against a SWE-bench task.
@@ -290,16 +291,26 @@ class DockerValidator:
             task: SWEBenchTask from the dataset
             patch: Git diff patch to apply (from Purple Agent)
             timeout: Overall timeout
+            include_pass_to_pass: Whether to also run pass_to_pass tests (regression check)
 
         Returns:
             DockerTestResult
         """
+        # Combine fail_to_pass and pass_to_pass tests
+        # Both should pass after the patch is applied
+        all_tests = list(task.fail_to_pass)
+        if include_pass_to_pass and task.pass_to_pass:
+            all_tests.extend(task.pass_to_pass)
+            print(f"[Validator] Running {len(task.fail_to_pass)} fail_to_pass + {len(task.pass_to_pass)} pass_to_pass tests")
+        else:
+            print(f"[Validator] Running {len(task.fail_to_pass)} fail_to_pass tests")
+
         return self.run_validation(
             instance_id=task.instance_id,
             repo=task.repo,
             base_commit=task.base_commit,
             patch=patch,
-            tests=task.fail_to_pass,
+            tests=all_tests,
             timeout=timeout,
             environment_setup_commit=task.environment_setup_commit,
             version=task.version,
