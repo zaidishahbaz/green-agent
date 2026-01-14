@@ -17,13 +17,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import re
+
 from swebench import SWEBenchTask
+from docker_validator import get_python_version
 
 
 # Container configuration
 DEFAULT_IMAGE = "swebench-bash"
 REPO_ROOT = "/workspace/repo"
+AGENT_TEMP_DIR = f"{REPO_ROOT}/.agent_temp"
 DEFAULT_BASH_TIMEOUT = 30
+
+# Blocked paths - prevent access to sensitive system directories
+BLOCKED_PATHS = (
+    "/tmp",
+    "/var/tmp",
+    "/etc",
+    "/root",
+    "/home",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/var/log",
+)
 DEFAULT_CONTAINER_MEMORY = "4g"
 DEFAULT_CONTAINER_CPUS = "2"
 
@@ -67,6 +85,18 @@ class ContainerExecutor:
         self.task: Optional[SWEBenchTask] = None
         self.python_version = "3.9"
         self._started = False
+        self.protected_test_files: list[str] = []
+
+    @staticmethod
+    def _extract_files_from_patch(patch: str) -> list[str]:
+        """Extract file paths from a unified diff patch."""
+        files = []
+        # Match lines like "+++ b/path/to/file.py" or "+++ path/to/file.py"
+        for match in re.finditer(r'^\+\+\+ (?:b/)?(.+)$', patch, re.MULTILINE):
+            filepath = match.group(1).strip()
+            if filepath and filepath != '/dev/null':
+                files.append(filepath)
+        return files
 
     @property
     def is_running(self) -> bool:
@@ -83,45 +113,6 @@ class ContainerExecutor:
             return result.stdout.strip() == "true"
         except Exception:
             return False
-
-    def _get_python_version(self, repo: str, version: str) -> str:
-        """Get appropriate Python version for repo/version combination."""
-        try:
-            ver = float(version)
-        except (ValueError, TypeError):
-            ver = 0.0
-
-        if repo == "django/django":
-            if ver < 3.0:
-                return "3.8"
-            elif ver < 4.0:
-                return "3.8"
-            elif ver < 4.1:
-                return "3.8"
-            elif ver < 5.0:
-                return "3.9"
-            else:
-                return "3.11"
-        elif repo == "astropy/astropy":
-            if ver < 3.0:
-                return "3.9"
-            elif ver < 5.3:
-                return "3.9"
-            else:
-                return "3.10"
-        elif repo == "matplotlib/matplotlib":
-            if ver < 3.5:
-                return "3.8"
-            else:
-                return "3.11"
-        elif repo == "scikit-learn/scikit-learn":
-            return "3.9"
-        elif repo == "pallets/flask":
-            return "3.10"
-        elif repo == "pydata/xarray":
-            return "3.10"
-        else:
-            return "3.9"
 
     def _ensure_image(self) -> tuple[bool, str]:
         """Ensure the Docker image exists, building if necessary."""
@@ -181,7 +172,7 @@ class ContainerExecutor:
         self.cwd = REPO_ROOT
 
         # Get Python version for this repo
-        self.python_version = self._get_python_version(task.repo, task.version)
+        self.python_version = get_python_version(task.repo, task.version)
 
         # Ensure image exists
         success, error = self._ensure_image()
@@ -249,6 +240,45 @@ class ContainerExecutor:
             if not checkout_result.success:
                 await self.stop()
                 return False, f"Checkout base_commit failed: {checkout_result.stderr}"
+
+        # Create .agent_temp directory for agent scratch space
+        self._exec_in_container(f"mkdir -p {AGENT_TEMP_DIR}", timeout=10)
+        # Add to .gitignore so it doesn't interfere with git operations
+        self._exec_in_container(
+            f"echo '.agent_temp/' >> {REPO_ROOT}/.gitignore",
+            timeout=10
+        )
+
+        # Apply test_patch if present (tests needed for evaluation)
+        # These files will be protected from modification by the agent
+        if task.test_patch:
+            self.protected_test_files = self._extract_files_from_patch(task.test_patch)
+            if self.protected_test_files:
+                # Write test patch to temp file
+                try:
+                    write_proc = subprocess.run(
+                        [
+                            "docker", "exec", "-i",
+                            self.container_id,
+                            "tee", f"{AGENT_TEMP_DIR}/test_patch.diff"
+                        ],
+                        input=task.test_patch,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if write_proc.returncode == 0:
+                        # Apply the test patch
+                        apply_result = self._exec_in_container(
+                            f"cd {REPO_ROOT} && git apply --verbose {AGENT_TEMP_DIR}/test_patch.diff",
+                            timeout=60
+                        )
+                        if not apply_result.success:
+                            print(f"Warning: Test patch application failed: {apply_result.stderr}")
+                        # Clean up
+                        self._exec_in_container(f"rm -f {AGENT_TEMP_DIR}/test_patch.diff", timeout=10)
+                except Exception as e:
+                    print(f"Warning: Failed to apply test patch: {e}")
 
         # Set read/exec permissions (remove write permissions)
         # This enforces OS-level security instead of whitelist
@@ -373,6 +403,30 @@ class ContainerExecutor:
         normalized = os.path.normpath(path)
         return normalized.startswith(self.repo_root)
 
+    def _contains_blocked_path(self, command: str) -> str | None:
+        """Check if command tries to access blocked system paths.
+
+        Returns the blocked path if found, None otherwise.
+        """
+        for blocked in BLOCKED_PATHS:
+            # Check for absolute paths to blocked directories
+            if blocked in command:
+                # Make sure it's actually a path reference, not just a substring
+                # e.g., "pytest" shouldn't trigger on "/tmp" being in command
+                patterns = [
+                    f" {blocked}",      # space before (argument)
+                    f" {blocked}/",     # path with subdir
+                    f"'{blocked}",      # quoted path
+                    f'"{blocked}',      # double-quoted path
+                    f">{blocked}",      # redirect to
+                    f"<{blocked}",      # redirect from
+                    f"cat {blocked}",   # explicit cat
+                    f"ls {blocked}",    # explicit ls
+                ]
+                if command.startswith(blocked) or any(p in command for p in patterns):
+                    return blocked
+        return None
+
     async def execute_bash(self, command: str, timeout: int = DEFAULT_BASH_TIMEOUT) -> BashResult:
         """
         Execute a bash command in the container with cwd tracking.
@@ -397,6 +451,38 @@ class ContainerExecutor:
             )
 
         command = command.strip()
+
+        # Check for blocked path access
+        blocked = self._contains_blocked_path(command)
+        if blocked:
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr=f"Access denied: {blocked} is outside the allowed workspace",
+                success=False,
+                error="Blocked path access"
+            )
+
+        # Restrict git log to only show commits up to base_commit
+        # This prevents the agent from seeing the fix commit
+        if self.task and command.startswith("git log"):
+            # If the command doesn't already have a commit range, add restriction
+            if self.task.base_commit not in command and ".." not in command:
+                # Append the base_commit restriction
+                command = f"{command} {self.task.base_commit}"
+
+        # Block git show for HEAD or recent commits (could reveal fix)
+        # Allow git show for specific files or older commits
+        if self.task and command.startswith("git show"):
+            # Block if trying to show HEAD or no specific commit given
+            if "HEAD" in command or command.strip() == "git show":
+                return BashResult(
+                    cwd=self.cwd,
+                    stdout="",
+                    stderr="git show HEAD is restricted. Use 'git show <commit-hash>' for older commits.",
+                    success=False,
+                    error="Restricted git command"
+                )
 
         # Handle cd command specially for cwd tracking
         if command == "cd" or command.startswith("cd "):
@@ -523,17 +609,38 @@ class ContainerExecutor:
                 error="Empty patch"
             )
 
-        # Temporarily enable write permissions
+        # Check if patch tries to modify protected test files
+        patch_files = self._extract_files_from_patch(patch)
+        protected_violations = [f for f in patch_files if f in self.protected_test_files]
+        if protected_violations:
+            return PatchResult(
+                success=False,
+                cwd=self.cwd,
+                stdout="",
+                stderr=f"Cannot modify protected test files: {', '.join(protected_violations)}",
+                error="Protected file modification attempted"
+            )
+
+        # Temporarily enable write permissions (excluding protected test files)
         self._exec_in_container(f"chmod -R u+w {REPO_ROOT}", timeout=60)
 
+        # Re-apply read-only to protected test files
+        if self.protected_test_files:
+            for test_file in self.protected_test_files:
+                self._exec_in_container(
+                    f"chmod a-w {REPO_ROOT}/{test_file} 2>/dev/null || true",
+                    timeout=10
+                )
+
         # Write patch to file using docker cp via stdin (more robust than shell escaping)
+        patch_file = f"{AGENT_TEMP_DIR}/patch.diff"
         try:
             # Use docker exec with stdin to write the patch file
             write_proc = subprocess.run(
                 [
                     "docker", "exec", "-i",
                     self.container_id,
-                    "tee", "/tmp/patch.diff"
+                    "tee", patch_file
                 ],
                 input=patch,
                 capture_output=True,
@@ -561,19 +668,19 @@ class ContainerExecutor:
 
         # Try to apply patch
         apply_result = self._exec_in_container(
-            f"cd {REPO_ROOT} && git apply --verbose /tmp/patch.diff",
+            f"cd {REPO_ROOT} && git apply --verbose {patch_file}",
             timeout=60
         )
 
         if not apply_result.success:
             # Try with --3way
             apply_result = self._exec_in_container(
-                f"cd {REPO_ROOT} && git apply --3way /tmp/patch.diff",
+                f"cd {REPO_ROOT} && git apply --3way {patch_file}",
                 timeout=60
             )
 
         # Clean up patch file
-        self._exec_in_container("rm -f /tmp/patch.diff", timeout=10)
+        self._exec_in_container(f"rm -f {patch_file}", timeout=10)
 
         # Restore read-only permissions
         self._exec_in_container(f"chmod -R a-w {REPO_ROOT} && chmod -R a+rX {REPO_ROOT}", timeout=60)
