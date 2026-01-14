@@ -1,7 +1,16 @@
+"""
+SWE-bench Green Agent - Orchestrates evaluation of code-fixing agents.
+
+This agent:
+1. Receives evaluation requests via A2A protocol
+2. Loads tasks from SWE-bench Verified dataset
+3. Manages Docker containers for secure bash execution
+4. Coordinates multi-turn conversations with solver (Purple) agents
+5. Validates patches and reports results
+"""
+
 import json
 import re
-import shlex
-import subprocess
 import time
 from typing import Any
 from pydantic import BaseModel, HttpUrl, ValidationError
@@ -12,169 +21,14 @@ from a2a.utils import get_message_text, new_agent_text_message
 from messenger import Messenger
 from swebench import SWEBenchDataset, SWEBenchTask
 from docker_validator import DockerValidator
+from container_executor import ContainerExecutor, BashResult, PatchResult
 
-
-# =============================================================================
-# Safe Bash Execution Configuration
-# =============================================================================
-
-# Allowed read-only commands (whitelist approach)
-ALLOWED_COMMANDS = {
-    # File listing and navigation
-    "ls", "pwd", "tree", "find", "locate", "which", "whereis", "file", "stat",
-    # File reading (read-only)
-    "cat", "head", "tail", "less", "more", "bat",
-    # Text searching
-    "grep", "egrep", "fgrep", "rg", "ag", "ack",
-    # Text processing (read-only, outputs to stdout)
-    "wc", "sort", "uniq", "cut", "awk", "sed", "tr", "diff", "comm",
-    # Git commands (read-only)
-    "git",
-    # Python/code inspection
-    "python", "python3",
-    # Directory info
-    "du", "df",
-    # Environment
-    "env", "printenv", "echo",
-}
-
-# Git subcommands that are allowed (read-only operations)
-ALLOWED_GIT_SUBCOMMANDS = {
-    "status", "log", "diff", "show", "branch", "tag", "describe",
-    "ls-files", "ls-tree", "cat-file", "rev-parse", "rev-list",
-    "blame", "grep", "shortlog", "config", "remote",
-}
-
-# Python flags that are safe (read-only inspection)
-ALLOWED_PYTHON_FLAGS = {"-c", "-m", "--version", "-V"}
-
-# Patterns that indicate dangerous operations (block these)
-DANGEROUS_PATTERNS = [
-    r">\s*[^&]",      # Output redirection (but not >>)
-    r">>",            # Append redirection
-    r"\|.*(?:rm|mv|cp|chmod|chown|dd|mkfs|wget|curl.*-o)",  # Pipe to dangerous commands
-    r";\s*(?:rm|mv|cp|chmod|chown)",  # Command chaining with dangerous commands
-    r"`[^`]+`",       # Command substitution with backticks
-    r"\$\([^)]+\)",   # Command substitution with $()
-    r"&&\s*(?:rm|mv|cp|chmod|chown)",  # AND chaining with dangerous commands
-    r"\|\|\s*(?:rm|mv|cp|chmod|chown)",  # OR chaining with dangerous commands
-]
 
 # Default timeout and turn limits
 DEFAULT_BASH_TIMEOUT = 30  # seconds per bash command
 DEFAULT_MAX_TURNS = 10     # max conversation turns before forcing patch
 DEFAULT_TASK_TIMEOUT = 600  # overall timeout per task in seconds
-
-
-def is_safe_bash_command(command: str) -> tuple[bool, str]:
-    """
-    Validate that a bash command is safe to execute (read-only/execute mode).
-
-    Returns:
-        tuple[bool, str]: (is_safe, error_message)
-    """
-    if not command or not command.strip():
-        return False, "Empty command"
-
-    command = command.strip()
-
-    # Check for dangerous patterns first
-    for pattern in DANGEROUS_PATTERNS:
-        if re.search(pattern, command):
-            return False, f"Command contains dangerous pattern: {pattern}"
-
-    # Parse the command to get the base command
-    try:
-        # Handle simple command parsing
-        parts = shlex.split(command)
-        if not parts:
-            return False, "Could not parse command"
-        base_cmd = parts[0]
-    except ValueError as e:
-        return False, f"Command parsing error: {e}"
-
-    # Check if base command is in whitelist
-    if base_cmd not in ALLOWED_COMMANDS:
-        return False, f"Command '{base_cmd}' is not in the allowed list. Allowed: {', '.join(sorted(ALLOWED_COMMANDS))}"
-
-    # Special handling for git commands
-    if base_cmd == "git":
-        if len(parts) < 2:
-            return True, ""  # Just "git" is fine
-        git_subcmd = parts[1]
-        if git_subcmd not in ALLOWED_GIT_SUBCOMMANDS:
-            return False, f"Git subcommand '{git_subcmd}' is not allowed. Allowed: {', '.join(sorted(ALLOWED_GIT_SUBCOMMANDS))}"
-
-    # Special handling for python commands - only allow inspection
-    if base_cmd in ("python", "python3"):
-        if len(parts) < 2:
-            return False, "Python command requires arguments"
-        # Check if it's a safe flag or just reading a file
-        flag = parts[1]
-        if flag.startswith("-"):
-            if flag not in ALLOWED_PYTHON_FLAGS:
-                return False, f"Python flag '{flag}' is not allowed"
-            # For -c, ensure it's not doing anything dangerous
-            if flag == "-c" and len(parts) > 2:
-                code = parts[2]
-                # Only allow simple inspection operations
-                if any(kw in code.lower() for kw in ["open(", "write", "os.", "subprocess", "import os", "exec", "eval"]):
-                    return False, "Python -c command contains potentially dangerous operations"
-
-    return True, ""
-
-
-def execute_bash_command(command: str, cwd: str = None, timeout: int = DEFAULT_BASH_TIMEOUT) -> dict:
-    """
-    Execute a safe bash command and return the result.
-
-    Args:
-        command: The bash command to execute
-        cwd: Working directory for the command
-        timeout: Timeout in seconds
-
-    Returns:
-        dict with keys: success, stdout, stderr, error
-    """
-    # Validate command first
-    is_safe, error_msg = is_safe_bash_command(command)
-    if not is_safe:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "error": f"Command blocked: {error_msg}"
-        }
-
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout[:10000] if result.stdout else "",  # Limit output size
-            "stderr": result.stderr[:2000] if result.stderr else "",
-            "error": None
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "error": f"Command timed out after {timeout} seconds"
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "",
-            "error": str(e)
-        }
+DEFAULT_MAX_PATCH_RETRIES = 3  # max patch retry attempts
 
 
 def parse_solver_response(response: dict) -> tuple[str | None, str | None]:
@@ -234,7 +88,13 @@ class EvalRequest(BaseModel):
 
 
 class TaskMessage(BaseModel):
-    """Message format sent to the solver agent."""
+    """
+    Message format sent to the solver agent.
+
+    Note: This contains ONLY the raw issue data. The Purple Agent is responsible
+    for all prompting and LLM-specific formatting. This ensures fairness across
+    different model implementations.
+    """
 
     instance_id: str
     repo: str
@@ -256,46 +116,6 @@ class TaskMessage(BaseModel):
             fail_to_pass=task.fail_to_pass,
         )
 
-    @property
-    def agent_prompt(self) -> str:
-        # Building minimal, fair and objective system prompt. Currently, 0 shot.
-        # TODO: Add support for bash commands. Add prompt for json output
-
-        return f"""You are a software-fixing agent. You are working on a repository to fix a bug.
-
-You may respond in one of two ways:
-
-1. Bash commands to explore or fetch context:
-   - Format: {{"action": "bash", "content": "<your shell command>"}}
-   - Example: {{"action": "bash", "content": "ls sklearn/metrics"}}
-   - Outputs from the command will be returned to you.
-   - Only read-only commands are allowed; do not modify files yet.
-
-2. Final patch to submit a fix:
-   - Format: {{"action": "patch", "content": "<unified diff>"}}
-   - Example: {{"action": "patch", "content": "--- a/foo.py\n+++ b/foo.py\n@@ ..."}}
-   - You may generate the patch as a minimal diff; it will be executed for you.
-
-You must output exactly ONE JSON object per response.
-The JSON object must contain exactly ONE action.
-Do not return arrays, multiple JSON objects, or additional text.
-If you need to take multiple steps, wait for the next turn.
-
-Task:
-You may alternate between Bash commands and reading outputs as needed. 
-When you are confident in your fix, submit a patch. 
-Do not perform arbitrary operations outside these formats.
-Do not include any explanations.
-
-Here are the Issue Details:
-
-Issue:
-{self.problem_statement}
-
-Additional context from issue discussion:
-{'N/A' if not self.hints_text else self.hints_text}
-"""
-
 
 class Agent:
     required_roles: list[str] = ["solver"]
@@ -305,6 +125,7 @@ class Agent:
         self.messenger = Messenger()
         self.dataset = SWEBenchDataset()
         self.docker_validator = DockerValidator()
+        self.container: ContainerExecutor | None = None
 
     def validate_request(self, request: EvalRequest) -> tuple[bool, str]:
         missing_roles = set(self.required_roles) - set(request.participants.keys())
@@ -339,9 +160,6 @@ class Agent:
         max_tasks = config.get("max_tasks", 1)
         return tasks[:max_tasks]
 
-    # TODO: Remove the keyword 'patch' and instead communicate through
-    # the a2a level names, such as 'respond' or 'input-requested' when
-    # requesting tool use via bash scripts
     def extract_patch(self, solver_response: str) -> str | None:
         """Extract patch from solver response.
 
@@ -366,8 +184,6 @@ class Agent:
             return solver_response.strip()
 
         # Try to extract from markdown code block
-        import re
-
         match = re.search(r"```(?:diff)?\s*(diff --git[\s\S]*?)```", solver_response)
         if match:
             return match.group(1).strip()
@@ -395,6 +211,23 @@ class Agent:
             "test_details": result.test_results,
         }
 
+    def _format_bash_result(self, result: BashResult) -> dict:
+        """Format bash result as structured output for the solver."""
+        return {
+            "cwd": result.cwd,
+            "stdout": result.stdout,
+            "stderr": result.stderr
+        }
+
+    def _format_patch_failure(self, result: PatchResult) -> dict:
+        """Format patch failure for retry."""
+        return {
+            "patch_failed": True,
+            "cwd": result.cwd,
+            "stderr": result.stderr,
+            "message": "Patch application failed. Please review the error and try again."
+        }
+
     async def run_multi_turn_conversation(
         self,
         task: SWEBenchTask,
@@ -403,13 +236,14 @@ class Agent:
         max_turns: int = DEFAULT_MAX_TURNS,
         bash_timeout: int = DEFAULT_BASH_TIMEOUT,
         task_timeout: int = DEFAULT_TASK_TIMEOUT,
+        max_patch_retries: int = DEFAULT_MAX_PATCH_RETRIES,
     ) -> dict[str, Any]:
         """
         Run a multi-turn conversation with the solver agent.
 
         The solver can:
-        1. Issue bash commands (read-only) to explore the codebase
-        2. Submit a final patch when ready
+        1. Issue bash commands to explore the codebase (executed in Docker)
+        2. Submit patches (with retry on failure)
 
         Args:
             task: The SWEBenchTask to solve
@@ -418,177 +252,224 @@ class Agent:
             max_turns: Maximum number of conversation turns
             bash_timeout: Timeout for each bash command
             task_timeout: Overall timeout for the entire task
+            max_patch_retries: Maximum patch retry attempts
 
         Returns:
             dict with keys: patch, turns, conversation_history, error
         """
+        # Create task message with raw issue data only
+        # Purple Agent handles all prompting
         task_message = TaskMessage.from_task(task)
-        initial_prompt = task_message.agent_prompt
+        initial_message = task_message.model_dump_json()
 
         conversation_history = []
         patch = None
         turn = 0
+        patch_attempts = 0
         start_time = time.time()
 
-        # Send initial prompt (new conversation)
+        # Start container for this task
+        self.container = ContainerExecutor()
         await updater.update_status(
             TaskState.working,
-            new_agent_text_message(f"[Turn {turn + 1}] Sending task to solver..."),
+            new_agent_text_message(f"Starting container for {task.instance_id}..."),
         )
 
-        try:
-            response = await self.messenger.talk_to_agent(
-                initial_prompt, solver_url, new_conversation=True, timeout=120
-            )
-        except Exception as e:
+        success, error = await self.container.start(task)
+        if not success:
             return {
                 "patch": None,
-                "turns": turn,
-                "conversation_history": conversation_history,
-                "error": f"Failed to send initial message: {e}"
+                "turns": 0,
+                "conversation_history": [],
+                "error": f"Failed to start container: {error}"
             }
 
-        conversation_history.append({
-            "turn": turn,
-            "role": "green",
-            "content": "[initial prompt]",
-        })
+        try:
+            # Send initial task data (new conversation)
+            await updater.update_status(
+                TaskState.working,
+                new_agent_text_message(f"[Turn {turn + 1}] Sending task to solver..."),
+            )
 
-        while turn < max_turns:
-            # Check overall timeout
-            elapsed = time.time() - start_time
-            if elapsed > task_timeout:
+            try:
+                response = await self.messenger.talk_to_agent(
+                    initial_message, solver_url, new_conversation=True, timeout=120
+                )
+            except Exception as e:
                 return {
                     "patch": None,
                     "turns": turn,
                     "conversation_history": conversation_history,
-                    "error": f"Task timed out after {task_timeout} seconds"
+                    "error": f"Failed to send initial message: {e}"
                 }
-
-            turn += 1
-
-            # Parse the solver's response
-            action, content = parse_solver_response(response)
 
             conversation_history.append({
                 "turn": turn,
-                "role": "solver",
-                "action": action,
-                "content": content[:500] if content else None,  # Truncate for history
+                "role": "green",
+                "content": "[task data sent]",
             })
 
-            print(f"[Turn {turn}] Solver action: {action}")
+            while turn < max_turns:
+                # Check overall timeout
+                elapsed = time.time() - start_time
+                if elapsed > task_timeout:
+                    return {
+                        "patch": None,
+                        "turns": turn,
+                        "conversation_history": conversation_history,
+                        "error": f"Task timed out after {task_timeout} seconds"
+                    }
 
-            if action == "patch":
-                # Solver submitted a patch - we're done
-                patch = content
-                await updater.update_status(
-                    TaskState.working,
-                    new_agent_text_message(f"[Turn {turn}] Solver submitted patch"),
-                )
-                break
+                turn += 1
 
-            elif action == "bash":
-                # Execute the bash command safely
-                await updater.update_status(
-                    TaskState.working,
-                    new_agent_text_message(f"[Turn {turn}] Executing bash: {content[:50]}..."),
-                )
+                # Parse the solver's response
+                action, content = parse_solver_response(response)
 
-                bash_result = execute_bash_command(content, timeout=bash_timeout)
+                conversation_history.append({
+                    "turn": turn,
+                    "role": "solver",
+                    "action": action,
+                    "content": content[:500] if content else None,  # Truncate for history
+                })
 
-                # Prepare response to send back to solver
-                if bash_result["error"]:
-                    bash_response = f"Error: {bash_result['error']}"
-                elif bash_result["success"]:
-                    bash_response = bash_result["stdout"]
-                    if bash_result["stderr"]:
-                        bash_response += f"\n[stderr]: {bash_result['stderr']}"
+                print(f"[Turn {turn}] Solver action: {action}")
+
+                if action == "patch":
+                    # Solver submitted a patch - try to apply it
+                    patch_attempts += 1
+                    await updater.update_status(
+                        TaskState.working,
+                        new_agent_text_message(f"[Turn {turn}] Applying patch (attempt {patch_attempts})..."),
+                    )
+
+                    patch_result = await self.container.apply_patch(content)
+
+                    if patch_result.success:
+                        # Patch applied successfully
+                        patch = content
+                        await updater.update_status(
+                            TaskState.working,
+                            new_agent_text_message(f"[Turn {turn}] Patch applied successfully"),
+                        )
+                        break
+                    else:
+                        # Patch failed - check if we can retry
+                        if patch_attempts >= max_patch_retries:
+                            # Max retries reached
+                            return {
+                                "patch": None,
+                                "turns": turn,
+                                "conversation_history": conversation_history,
+                                "error": f"Patch failed after {patch_attempts} attempts: {patch_result.stderr}"
+                            }
+
+                        # Send failure feedback to solver for retry
+                        feedback = self._format_patch_failure(patch_result)
+                        conversation_history.append({
+                            "turn": turn,
+                            "role": "green",
+                            "type": "patch_failure",
+                            "content": f"Patch failed: {patch_result.stderr[:200]}",
+                        })
+
+                        try:
+                            response = await self.messenger.talk_to_agent(
+                                json.dumps(feedback), solver_url, new_conversation=False, timeout=120
+                            )
+                        except Exception as e:
+                            return {
+                                "patch": None,
+                                "turns": turn,
+                                "conversation_history": conversation_history,
+                                "error": f"Failed to send patch failure feedback: {e}"
+                            }
+
+                elif action == "bash":
+                    # Execute the bash command in container
+                    await updater.update_status(
+                        TaskState.working,
+                        new_agent_text_message(f"[Turn {turn}] Executing: {content[:50]}..."),
+                    )
+
+                    bash_result = await self.container.execute_bash(content, timeout=bash_timeout)
+
+                    # Format structured response
+                    bash_output = self._format_bash_result(bash_result)
+
+                    conversation_history.append({
+                        "turn": turn,
+                        "role": "green",
+                        "type": "bash_result",
+                        "cwd": bash_result.cwd,
+                        "content": bash_result.stdout[:200] if bash_result.stdout else bash_result.stderr[:200],
+                    })
+
+                    # Send bash output back to solver
+                    try:
+                        response = await self.messenger.talk_to_agent(
+                            json.dumps(bash_output), solver_url, new_conversation=False, timeout=120
+                        )
+                    except Exception as e:
+                        return {
+                            "patch": None,
+                            "turns": turn,
+                            "conversation_history": conversation_history,
+                            "error": f"Failed to send bash result: {e}"
+                        }
+
                 else:
-                    bash_response = f"Command failed (exit code non-zero)\nstdout: {bash_result['stdout']}\nstderr: {bash_result['stderr']}"
-
-                # Truncate response if too long
-                if len(bash_response) > 8000:
-                    bash_response = bash_response[:8000] + "\n... [output truncated]"
-
-                conversation_history.append({
-                    "turn": turn,
-                    "role": "green",
-                    "type": "bash_result",
-                    "content": bash_response[:500],  # Truncate for history
-                })
-
-                # Send bash output back to solver (continue conversation)
-                feedback_message = f"""Here is the output of your bash command:
-
-```
-{bash_response}
-```
-
-Continue exploring or submit your patch when ready. Remember:
-- Use {{"action": "bash", "content": "<command>"}} for more exploration
-- Use {{"action": "patch", "content": "<unified diff>"}} to submit your fix"""
-
-                try:
-                    response = await self.messenger.talk_to_agent(
-                        feedback_message, solver_url, new_conversation=False, timeout=120
+                    # Unknown or no action - prompt solver to respond properly
+                    await updater.update_status(
+                        TaskState.working,
+                        new_agent_text_message(f"[Turn {turn}] Invalid response, prompting solver..."),
                     )
-                except Exception as e:
-                    return {
-                        "patch": None,
-                        "turns": turn,
-                        "conversation_history": conversation_history,
-                        "error": f"Failed to send bash result: {e}"
+
+                    conversation_history.append({
+                        "turn": turn,
+                        "role": "green",
+                        "type": "error_feedback",
+                        "content": "Invalid response format",
+                    })
+
+                    error_feedback = {
+                        "error": "Invalid response format",
+                        "message": "Please respond with JSON: {\"action\": \"bash\"|\"patch\", \"content\": \"...\"}",
+                        "cwd": self.container.cwd
                     }
 
-            else:
-                # Unknown or no action - prompt solver to respond properly
-                await updater.update_status(
-                    TaskState.working,
-                    new_agent_text_message(f"[Turn {turn}] Invalid response, prompting solver..."),
-                )
+                    try:
+                        response = await self.messenger.talk_to_agent(
+                            json.dumps(error_feedback), solver_url, new_conversation=False, timeout=120
+                        )
+                    except Exception as e:
+                        return {
+                            "patch": None,
+                            "turns": turn,
+                            "conversation_history": conversation_history,
+                            "error": f"Failed to send error feedback: {e}"
+                        }
 
-                conversation_history.append({
-                    "turn": turn,
-                    "role": "green",
-                    "type": "error_feedback",
-                    "content": "Invalid response format",
-                })
+            # If we exhausted turns without getting a patch
+            if patch is None:
+                return {
+                    "patch": None,
+                    "turns": turn,
+                    "conversation_history": conversation_history,
+                    "error": f"Max turns ({max_turns}) reached without successful patch"
+                }
 
-                feedback_message = f"""Your response was not in the expected format. Please respond with exactly ONE JSON object:
-
-- For exploration: {{"action": "bash", "content": "<command>"}}
-- For submitting fix: {{"action": "patch", "content": "<unified diff>"}}
-
-Do not include any other text. Just the JSON object."""
-
-                try:
-                    response = await self.messenger.talk_to_agent(
-                        feedback_message, solver_url, new_conversation=False, timeout=120
-                    )
-                except Exception as e:
-                    return {
-                        "patch": None,
-                        "turns": turn,
-                        "conversation_history": conversation_history,
-                        "error": f"Failed to send error feedback: {e}"
-                    }
-
-        # If we exhausted turns without getting a patch
-        if patch is None:
             return {
-                "patch": None,
+                "patch": patch,
                 "turns": turn,
                 "conversation_history": conversation_history,
-                "error": f"Max turns ({max_turns}) reached without patch submission"
+                "error": None
             }
 
-        return {
-            "patch": patch,
-            "turns": turn,
-            "conversation_history": conversation_history,
-            "error": None
-        }
+        finally:
+            # Always clean up container
+            if self.container:
+                await self.container.stop()
+                self.container = None
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
         """Run SWE-bench evaluation with multi-turn support.
@@ -603,7 +484,8 @@ Do not include any other text. Just the JSON object."""
                 "max_tasks": 10,  # optional: limit number of tasks (default: 1)
                 "max_turns": 10,  # optional: max conversation turns per task (default: 10)
                 "bash_timeout": 30,  # optional: timeout per bash command (default: 30s)
-                "task_timeout": 600  # optional: overall timeout per task (default: 600s)
+                "task_timeout": 600,  # optional: overall timeout per task (default: 600s)
+                "max_patch_retries": 3  # optional: max patch retry attempts (default: 3)
             }
         }
         """
@@ -625,6 +507,7 @@ Do not include any other text. Just the JSON object."""
         max_turns = request.config.get("max_turns", DEFAULT_MAX_TURNS)
         bash_timeout = request.config.get("bash_timeout", DEFAULT_BASH_TIMEOUT)
         task_timeout = request.config.get("task_timeout", DEFAULT_TASK_TIMEOUT)
+        max_patch_retries = request.config.get("max_patch_retries", DEFAULT_MAX_PATCH_RETRIES)
 
         # Load dataset
         await updater.update_status(
@@ -657,7 +540,7 @@ Do not include any other text. Just the JSON object."""
             await updater.update_status(
                 TaskState.working,
                 new_agent_text_message(
-                    f"[{i+1}/{len(tasks)}] Starting multi-turn conversation for {task.instance_id}..."
+                    f"[{i+1}/{len(tasks)}] Starting evaluation for {task.instance_id}..."
                 ),
             )
 
@@ -676,6 +559,7 @@ Do not include any other text. Just the JSON object."""
                     max_turns=max_turns,
                     bash_timeout=bash_timeout,
                     task_timeout=task_timeout,
+                    max_patch_retries=max_patch_retries,
                 )
 
                 result_entry["turns"] = conversation_result["turns"]
