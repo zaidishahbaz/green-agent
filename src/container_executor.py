@@ -65,6 +65,7 @@ class ContainerExecutor:
         self.cwd = REPO_ROOT
         self.repo_root = REPO_ROOT
         self.task: Optional[SWEBenchTask] = None
+        self.python_version = "3.9"
         self._started = False
 
     @property
@@ -122,11 +123,11 @@ class ContainerExecutor:
         else:
             return "3.9"
 
-    def _ensure_image(self, python_version: str = "3.9") -> tuple[bool, str]:
+    def _ensure_image(self) -> tuple[bool, str]:
         """Ensure the Docker image exists, building if necessary."""
         # Check if image exists
         result = subprocess.run(
-            ["docker", "image", "inspect", f"{self.image_name}:{python_version}"],
+            ["docker", "image", "inspect", f"{self.image_name}:{self.python_version}"],
             capture_output=True
         )
         if result.returncode == 0:
@@ -142,8 +143,8 @@ class ContainerExecutor:
                 [
                     "docker", "build",
                     "-f", str(dockerfile_path),
-                    "--build-arg", f"PYTHON_VERSION={python_version}",
-                    "-t", f"{self.image_name}:{python_version}",
+                    "--build-arg", f"PYTHON_VERSION={self.python_version}",
+                    "-t", f"{self.image_name}:{self.python_version}",
                     str(dockerfile_path.parent.parent),
                 ],
                 capture_output=True,
@@ -180,10 +181,10 @@ class ContainerExecutor:
         self.cwd = REPO_ROOT
 
         # Get Python version for this repo
-        python_version = self._get_python_version(task.repo, task.version)
+        self.python_version = self._get_python_version(task.repo, task.version)
 
         # Ensure image exists
-        success, error = self._ensure_image(python_version)
+        success, error = self._ensure_image()
         if not success:
             return False, f"Image build failed: {error}"
 
@@ -200,7 +201,7 @@ class ContainerExecutor:
                     "--memory", DEFAULT_CONTAINER_MEMORY,
                     "--cpus", DEFAULT_CONTAINER_CPUS,
                     "-w", REPO_ROOT,
-                    f"{self.image_name}:{python_version}",
+                    f"{self.image_name}:{self.python_version}",
                     "tail", "-f", "/dev/null"  # Keep container alive
                 ],
                 capture_output=True,

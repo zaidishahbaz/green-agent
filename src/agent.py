@@ -96,23 +96,19 @@ class TaskMessage(BaseModel):
     different model implementations.
     """
 
-    instance_id: str
-    repo: str
-    base_commit: str
+    cwd: str
     problem_statement: str
     hints_text: str
-    version: str
+    python_version: str
     fail_to_pass: list[str]
 
     @classmethod
-    def from_task(cls, task: SWEBenchTask) -> "TaskMessage":
+    def from_task_and_container(cls, task: SWEBenchTask, container: ContainerExecutor) -> "TaskMessage":
         return cls(
-            instance_id=task.instance_id,
-            repo=task.repo,
-            base_commit=task.base_commit,
+            cwd=container.cwd,
             problem_statement=task.problem_statement,
             hints_text=task.hints_text,
-            version=task.version,
+            python_version=container.python_version,
             fail_to_pass=task.fail_to_pass,
         )
 
@@ -257,10 +253,6 @@ class Agent:
         Returns:
             dict with keys: patch, turns, conversation_history, error
         """
-        # Create task message with raw issue data only
-        # Purple Agent handles all prompting
-        task_message = TaskMessage.from_task(task)
-        initial_message = task_message.model_dump_json()
 
         conversation_history = []
         patch = None
@@ -283,6 +275,11 @@ class Agent:
                 "conversation_history": [],
                 "error": f"Failed to start container: {error}"
             }
+        
+        # Create task message with raw issue data only
+        # Purple Agent handles all prompting
+        task_message = TaskMessage.from_task_and_container(task, self.container)
+        initial_message = task_message.model_dump_json()
 
         try:
             # Send initial task data (new conversation)
