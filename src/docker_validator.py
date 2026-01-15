@@ -110,6 +110,8 @@ class DockerTestResult:
     patch_applied: bool = False
     install_success: bool = False
     test_results: dict = field(default_factory=dict)
+    fail_to_pass_results: dict = field(default_factory=dict)  # Results for fail_to_pass tests
+    pass_to_pass_results: dict = field(default_factory=dict)  # Results for pass_to_pass tests
     errors: list = field(default_factory=list)
     summary: dict = field(default_factory=dict)
 
@@ -124,6 +126,16 @@ class DockerTestResult:
     @property
     def tests_failed(self) -> int:
         return self.summary.get("failed", 0)
+
+    @property
+    def fail_to_pass_score(self) -> float:
+        """Score for fail_to_pass tests (should all pass after fix)."""
+        return self.summary.get("fail_to_pass_score", 0.0)
+
+    @property
+    def pass_to_pass_score(self) -> float:
+        """Score for pass_to_pass tests (regression check)."""
+        return self.summary.get("pass_to_pass_score", 0.0)
 
 
 class DockerValidator:
@@ -181,7 +193,9 @@ class DockerValidator:
         repo: str,
         base_commit: str,
         patch: str,
-        tests: list[str],
+        fail_to_pass: list[str],
+        pass_to_pass: list[str] | None = None,
+        test_patch: str | None = None,
         timeout: int = 600,
         timeout_per_test: int = 120,
         environment_setup_commit: str | None = None,
@@ -195,7 +209,9 @@ class DockerValidator:
             repo: Repository (e.g., "django/django")
             base_commit: Commit hash to checkout for evaluation
             patch: Git diff patch to apply
-            tests: List of test identifiers to run
+            fail_to_pass: List of tests that should pass after the fix
+            pass_to_pass: List of tests that should continue passing (regression check)
+            test_patch: Patch to apply test files before running tests
             timeout: Overall timeout for the container
             timeout_per_test: Timeout per individual test
             environment_setup_commit: Commit hash for installing dependencies (optional)
@@ -225,7 +241,9 @@ class DockerValidator:
             "base_commit": base_commit,
             "environment_setup_commit": environment_setup_commit or base_commit,
             "patch": patch,
-            "tests": tests,
+            "fail_to_pass": fail_to_pass,
+            "pass_to_pass": pass_to_pass or [],
+            "test_patch": test_patch,
             "timeout_per_test": timeout_per_test,
         }
 
@@ -257,6 +275,8 @@ class DockerValidator:
                     patch_applied=output.get("patch_applied", False),
                     install_success=output.get("install_success", False),
                     test_results=output.get("test_results", {}),
+                    fail_to_pass_results=output.get("fail_to_pass_results", {}),
+                    pass_to_pass_results=output.get("pass_to_pass_results", {}),
                     errors=output.get("errors", []),
                     summary=output.get("summary", {}),
                 )
@@ -296,11 +316,9 @@ class DockerValidator:
         Returns:
             DockerTestResult
         """
-        # Combine fail_to_pass and pass_to_pass tests
-        # Both should pass after the patch is applied
-        all_tests = list(task.fail_to_pass)
+        pass_to_pass_tests = task.pass_to_pass if include_pass_to_pass else None
+
         if include_pass_to_pass and task.pass_to_pass:
-            all_tests.extend(task.pass_to_pass)
             print(f"[Validator] Running {len(task.fail_to_pass)} fail_to_pass + {len(task.pass_to_pass)} pass_to_pass tests")
         else:
             print(f"[Validator] Running {len(task.fail_to_pass)} fail_to_pass tests")
@@ -310,7 +328,9 @@ class DockerValidator:
             repo=task.repo,
             base_commit=task.base_commit,
             patch=patch,
-            tests=all_tests,
+            fail_to_pass=list(task.fail_to_pass),
+            pass_to_pass=list(pass_to_pass_tests) if pass_to_pass_tests else None,
+            test_patch=task.test_patch if hasattr(task, 'test_patch') else None,
             timeout=timeout,
             environment_setup_commit=task.environment_setup_commit,
             version=task.version,

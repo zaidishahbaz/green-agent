@@ -216,33 +216,24 @@ class ContainerExecutor:
             await self.stop()
             return False, f"Clone failed: {clone_result.stderr}"
 
-        # Checkout environment_setup_commit to get requirements files
+        # Checkout base_commit for evaluation
         checkout_result = self._exec_in_container(
-            f"git checkout --quiet {task.environment_setup_commit}",
+            f"git checkout --quiet {task.base_commit}",
             timeout=60
         )
         if not checkout_result.success:
             await self.stop()
-            return False, f"Checkout environment_setup_commit failed: {checkout_result.stderr}"
+            return False, f"Checkout base_commit failed: {checkout_result.stderr}"
 
-        # Copy requirements files to temp location before switching commits
+        # Extract requirements files from environment_setup_commit without switching branches
+        # Use git show to get file contents from that commit
         self._exec_in_container("mkdir -p /tmp/env_reqs", timeout=10)
         for req_file in ["requirements.txt", "requirements-dev.txt", "test-requirements.txt",
                          "requirements_dev.txt", "environment.yml", "environment.yaml"]:
             self._exec_in_container(
-                f"cp {REPO_ROOT}/{req_file} /tmp/env_reqs/ 2>/dev/null || true",
+                f"git show {task.environment_setup_commit}:{req_file} > /tmp/env_reqs/{req_file} 2>/dev/null || true",
                 timeout=10
             )
-
-        # Checkout to base_commit for evaluation
-        if task.environment_setup_commit != task.base_commit:
-            checkout_result = self._exec_in_container(
-                f"git checkout --quiet {task.base_commit}",
-                timeout=60
-            )
-            if not checkout_result.success:
-                await self.stop()
-                return False, f"Checkout base_commit failed: {checkout_result.stderr}"
 
         # Install external dependencies from saved requirements files
         install_result = self._install_external_dependencies()
@@ -283,7 +274,7 @@ class ContainerExecutor:
                     if write_proc.returncode == 0:
                         # Apply the test patch
                         apply_result = self._exec_in_container(
-                            f"cd {REPO_ROOT} && git apply --whitespace=fix --ignore-whitespace --verbose {AGENT_TEMP_DIR}/test_patch.diff",
+                            f"cd {REPO_ROOT} && git apply --whitespace=fix --verbose {AGENT_TEMP_DIR}/test_patch.diff",
                             timeout=60
                         )
                         if not apply_result.success:
@@ -697,14 +688,14 @@ class ContainerExecutor:
 
         # Try to apply patch with multiple fallback strategies
         apply_result = self._exec_in_container(
-            f"cd {REPO_ROOT} && git apply --whitespace=fix --ignore-whitespace --verbose {patch_file}",
+            f"cd {REPO_ROOT} && git apply --whitespace=fix --verbose {patch_file}",
             timeout=60
         )
 
         if not apply_result.success:
             # Try with --3way for merge conflicts
             apply_result = self._exec_in_container(
-                f"cd {REPO_ROOT} && git apply --whitespace=fix --ignore-whitespace --3way {patch_file}",
+                f"cd {REPO_ROOT} && git apply --whitespace=fix --3way {patch_file}",
                 timeout=60
             )
 
