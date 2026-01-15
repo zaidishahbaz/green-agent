@@ -447,82 +447,88 @@ class ContainerExecutor:
                     return blocked
         return None
 
+    def _is_commit_ahead_of_base(self, commit_ref: str) -> bool:
+        """
+        Check if a commit reference points to a commit ahead of base_commit.
+
+        Uses 'git merge-base --is-ancestor' to check if base_commit is an ancestor
+        of the referenced commit. If base_commit IS an ancestor of commit_ref,
+        that means commit_ref is ahead (in the future) and should be blocked.
+
+        Returns True if commit_ref is ahead of base_commit (should be blocked).
+        """
+        if not self.task or not self.container_id:
+            return False
+
+        base_commit = self.task.base_commit
+
+        # Check if base_commit is an ancestor of commit_ref
+        # If it IS an ancestor, then commit_ref is ahead of base_commit (blocked)
+        # Exit code 0 = is ancestor, exit code 1 = is not ancestor
+        result = self._exec_in_container(
+            f"git merge-base --is-ancestor {base_commit} {commit_ref} && echo 'is_ahead' || echo 'not_ahead'",
+            timeout=10
+        )
+
+        # If base_commit is an ancestor of commit_ref, the commit is ahead
+        return "is_ahead" in result.stdout
+
+    def _extract_commit_refs_from_git_cmd(self, git_cmd: str) -> list[str]:
+        """Extract potential commit references from a git command."""
+        import shlex
+
+        refs = []
+        try:
+            # Parse command into tokens
+            tokens = shlex.split(git_cmd)
+        except ValueError:
+            # If parsing fails, fall back to simple split
+            tokens = git_cmd.split()
+
+        # Skip the 'git' and subcommand parts, look for refs
+        # Common patterns: git log <ref>, git show <ref>, git diff <ref1>..<ref2>
+        skip_next = False
+        for i, token in enumerate(tokens):
+            if skip_next:
+                skip_next = False
+                continue
+            # Skip flags and their values
+            if token.startswith("-"):
+                # Some flags take values
+                if token in ["-n", "--max-count", "--author", "--since", "--until", "--grep"]:
+                    skip_next = True
+                continue
+            # Skip 'git' and common subcommands
+            if token in ["git", "log", "show", "diff", "checkout", "rev-parse"]:
+                continue
+            # Skip file paths (contain / but don't look like refs)
+            if "/" in token and not token.startswith("origin/"):
+                continue
+            # This might be a ref - could be commit hash, branch name, or special ref
+            if token and not token.startswith("--"):
+                # Handle diff ranges like commit1..commit2
+                if ".." in token:
+                    refs.extend(token.split(".."))
+                else:
+                    refs.append(token)
+
+        return refs
+
     def _check_git_restriction(self, command: str) -> BashResult | None:
         """
         Check if a git command tries to access commits after base_commit.
 
         This prevents the agent from seeing the fix commit or future commits.
+        Uses 'git merge-base --is-ancestor' to dynamically check commit ancestry.
+
         Returns a BashResult with error if blocked, None if allowed.
         """
         if not self.task:
             return None
 
-        # References that could reveal future commits
-        BLOCKED_REFS = ["HEAD", "main", "master", "origin/main", "origin/master", "origin/HEAD"]
-
-        # Commands that could reveal future commits
         git_cmd = command.strip()
 
-        # git log restrictions
-        if git_cmd.startswith("git log"):
-            # Block if using HEAD, main, master without explicit base_commit restriction
-            for ref in BLOCKED_REFS:
-                if ref in git_cmd and self.task.base_commit not in git_cmd:
-                    return BashResult(
-                        cwd=self.cwd,
-                        stdout="",
-                        stderr=f"git log with '{ref}' is restricted. Use 'git log {self.task.base_commit}' or earlier commits.",
-                        success=False,
-                        error="Restricted git command"
-                    )
-
-        # git show restrictions
-        if git_cmd.startswith("git show"):
-            # Block HEAD, main, master references
-            for ref in BLOCKED_REFS:
-                if ref in git_cmd:
-                    return BashResult(
-                        cwd=self.cwd,
-                        stdout="",
-                        stderr=f"git show with '{ref}' is restricted. Use specific commit hashes at or before {self.task.base_commit[:8]}.",
-                        success=False,
-                        error="Restricted git command"
-                    )
-            # Block bare "git show" (shows HEAD by default)
-            if git_cmd.strip() == "git show":
-                return BashResult(
-                    cwd=self.cwd,
-                    stdout="",
-                    stderr=f"git show without arguments is restricted. Use 'git show <commit-hash>' for commits at or before {self.task.base_commit[:8]}.",
-                    success=False,
-                    error="Restricted git command"
-                )
-
-        # git diff restrictions (could show changes between base and fix)
-        if git_cmd.startswith("git diff"):
-            for ref in BLOCKED_REFS:
-                if ref in git_cmd:
-                    return BashResult(
-                        cwd=self.cwd,
-                        stdout="",
-                        stderr=f"git diff with '{ref}' is restricted. Use 'git diff' for unstaged changes or specific older commits.",
-                        success=False,
-                        error="Restricted git command"
-                    )
-
-        # git checkout restrictions (prevent checking out fix commit)
-        if git_cmd.startswith("git checkout"):
-            for ref in BLOCKED_REFS:
-                if ref in git_cmd:
-                    return BashResult(
-                        cwd=self.cwd,
-                        stdout="",
-                        stderr=f"git checkout '{ref}' is restricted. The repo is checked out at base_commit {self.task.base_commit[:8]}.",
-                        success=False,
-                        error="Restricted git command"
-                    )
-
-        # git reset restrictions
+        # Always block these commands regardless of arguments
         if git_cmd.startswith("git reset"):
             return BashResult(
                 cwd=self.cwd,
@@ -532,7 +538,6 @@ class ContainerExecutor:
                 error="Restricted git command"
             )
 
-        # git pull/fetch restrictions
         if git_cmd.startswith("git pull") or git_cmd.startswith("git fetch"):
             return BashResult(
                 cwd=self.cwd,
@@ -541,6 +546,46 @@ class ContainerExecutor:
                 success=False,
                 error="Restricted git command"
             )
+
+        # Commands that might reference commits we need to check
+        commit_referencing_cmds = ["git log", "git show", "git diff", "git checkout", "git rev-parse"]
+
+        is_commit_cmd = any(git_cmd.startswith(cmd) for cmd in commit_referencing_cmds)
+        if not is_commit_cmd:
+            return None
+
+        # Handle bare commands that default to HEAD
+        if git_cmd.strip() in ["git log", "git show"]:
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr=f"{git_cmd} without arguments shows commits ahead of base_commit. "
+                       f"Use '{git_cmd} {self.task.base_commit}' or an earlier commit.",
+                success=False,
+                error="Restricted git command"
+            )
+
+        # Extract commit references from the command
+        refs = self._extract_commit_refs_from_git_cmd(git_cmd)
+
+        # Check each reference
+        for ref in refs:
+            # Skip if it's the base_commit itself or looks like a file path
+            if ref == self.task.base_commit:
+                continue
+            if ref.startswith(self.task.base_commit[:8]):
+                continue
+
+            # Check if this ref points to a commit ahead of base_commit
+            if self._is_commit_ahead_of_base(ref):
+                return BashResult(
+                    cwd=self.cwd,
+                    stdout="",
+                    stderr=f"'{ref}' references a commit ahead of base_commit ({self.task.base_commit[:8]}). "
+                           f"Only commits at or before base_commit are accessible.",
+                    success=False,
+                    error="Restricted git command"
+                )
 
         return None
 
@@ -569,22 +614,27 @@ class ContainerExecutor:
 
         command = command.strip()
 
-        # Check for blocked path access
-        blocked = self._contains_blocked_path(command)
-        if blocked:
-            return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr=f"Access denied: {blocked} is outside the allowed workspace",
-                success=False,
-                error="Blocked path access"
-            )
+        # Split compound commands by && and check each sub-command
+        # This ensures restrictions are applied to each part of a compound command
+        sub_commands = [c.strip() for c in command.split("&&")]
 
-        # Restrict git commands to prevent looking at commits after base_commit
-        # This prevents the agent from seeing the fix commit
-        git_restricted = self._check_git_restriction(command)
-        if git_restricted:
-            return git_restricted
+        for sub_cmd in sub_commands:
+            # Check for blocked path access on each sub-command
+            blocked = self._contains_blocked_path(sub_cmd)
+            if blocked:
+                return BashResult(
+                    cwd=self.cwd,
+                    stdout="",
+                    stderr=f"Access denied: {blocked} is outside the allowed workspace",
+                    success=False,
+                    error="Blocked path access"
+                )
+
+            # Restrict git commands to prevent looking at commits after base_commit
+            # This prevents the agent from seeing the fix commit
+            git_restricted = self._check_git_restriction(sub_cmd)
+            if git_restricted:
+                return git_restricted
 
         # Handle cd command specially for cwd tracking
         if command == "cd" or command.startswith("cd "):
