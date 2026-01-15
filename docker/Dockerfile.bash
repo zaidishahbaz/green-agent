@@ -5,7 +5,14 @@
 # - Applying patches
 
 ARG PYTHON_VERSION=3.9
-FROM python:${PYTHON_VERSION}-slim-bookworm
+# Use slim-buster for Python 3.6/3.7 (bookworm doesn't have these)
+# Use slim-bookworm for Python 3.8+
+FROM python:${PYTHON_VERSION}-slim-buster
+
+# Fix for Debian buster EOL - use archive repositories
+RUN echo "deb http://archive.debian.org/debian buster main" > /etc/apt/sources.list && \
+    echo "deb http://archive.debian.org/debian-security buster/updates main" >> /etc/apt/sources.list && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,7 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     curl \
     tree \
-    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Install common Python dev tools
