@@ -19,8 +19,8 @@ cwd = "/Users/zaidishahbaz/Desktop/side/agentsbeat/purple-swebench"
 [config]
 # Evaluation configuration passed to the green agent
 max_tasks = 1
-repo = "sympy/sympy"
-instance_id = "sympy__sympy-20916"
+repo = "astropy/astropy"
+# instance_id = "sympy__sympy-20916"
 # Optional filters:
 # repo = "django/django"                 # Filter by repo
 # difficulty = "easy"                    # Filter by difficulty
