@@ -163,6 +163,16 @@ def convert_test_name_for_pytest(test_name):
     return test_name
 
 
+def is_simple_test_name(test_name):
+    """Check if test name is just a function name (no path info)."""
+    # Simple test names: test_foo, test_bar_baz
+    # Not simple: module.Class.test_foo, test_foo (module.Class)
+    import re
+    if re.match(r'^test_\w+$', test_name):
+        return True
+    return False
+
+
 def run_test(test_name, repo_dir, timeout=120):
     """Run a single test and return result."""
     framework = detect_test_framework(repo_dir)
@@ -174,6 +184,13 @@ def run_test(test_name, repo_dir, timeout=120):
         # Run Django tests using runtests.py
         code, stdout, stderr = run_command(
             ["python", "tests/runtests.py", django_test, "-v", "2"],
+            cwd=repo_dir,
+            timeout=timeout
+        )
+    elif is_simple_test_name(test_name):
+        # Simple test name like "test_super_sub" - use pytest -k for keyword match
+        code, stdout, stderr = run_command(
+            ["python", "-m", "pytest", "-k", test_name, "-xvs", "--tb=short"],
             cwd=repo_dir,
             timeout=timeout
         )

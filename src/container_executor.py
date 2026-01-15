@@ -447,6 +447,148 @@ class ContainerExecutor:
                     return blocked
         return None
 
+    def _is_commit_ahead_of_base(self, commit_ref: str) -> bool:
+        """
+        Check if a commit reference points to a commit ahead of base_commit.
+
+        Uses 'git merge-base --is-ancestor' to check if base_commit is an ancestor
+        of the referenced commit. If base_commit IS an ancestor of commit_ref,
+        that means commit_ref is ahead (in the future) and should be blocked.
+
+        Returns True if commit_ref is ahead of base_commit (should be blocked).
+        """
+        if not self.task or not self.container_id:
+            return False
+
+        base_commit = self.task.base_commit
+
+        # Check if base_commit is an ancestor of commit_ref
+        # If it IS an ancestor, then commit_ref is ahead of base_commit (blocked)
+        # Exit code 0 = is ancestor, exit code 1 = is not ancestor
+        result = self._exec_in_container(
+            f"git merge-base --is-ancestor {base_commit} {commit_ref} && echo 'is_ahead' || echo 'not_ahead'",
+            timeout=10
+        )
+
+        # If base_commit is an ancestor of commit_ref, the commit is ahead
+        return "is_ahead" in result.stdout
+
+    def _extract_commit_refs_from_git_cmd(self, git_cmd: str) -> list[str]:
+        """Extract potential commit references from a git command."""
+        import shlex
+
+        refs = []
+        try:
+            # Parse command into tokens
+            tokens = shlex.split(git_cmd)
+        except ValueError:
+            # If parsing fails, fall back to simple split
+            tokens = git_cmd.split()
+
+        # Skip the 'git' and subcommand parts, look for refs
+        # Common patterns: git log <ref>, git show <ref>, git diff <ref1>..<ref2>
+        skip_next = False
+        for i, token in enumerate(tokens):
+            if skip_next:
+                skip_next = False
+                continue
+            # Skip flags and their values
+            if token.startswith("-"):
+                # Some flags take values
+                if token in ["-n", "--max-count", "--author", "--since", "--until", "--grep"]:
+                    skip_next = True
+                continue
+            # Skip 'git' and common subcommands
+            if token in ["git", "log", "show", "diff", "checkout", "rev-parse"]:
+                continue
+            # Skip file paths (contain / but don't look like refs)
+            if "/" in token and not token.startswith("origin/"):
+                continue
+            # This might be a ref - could be commit hash, branch name, or special ref
+            if token and not token.startswith("--"):
+                # Handle diff ranges like commit1..commit2
+                if ".." in token:
+                    refs.extend(token.split(".."))
+                else:
+                    refs.append(token)
+
+        return refs
+
+    def _check_git_restriction(self, command: str) -> BashResult | None:
+        """
+        Check if a git command tries to access commits after base_commit.
+
+        This prevents the agent from seeing the fix commit or future commits.
+        Uses 'git merge-base --is-ancestor' to dynamically check commit ancestry.
+
+        Returns a BashResult with error if blocked, None if allowed.
+        """
+        if not self.task:
+            return None
+
+        git_cmd = command.strip()
+
+        # Always block these commands regardless of arguments
+        if git_cmd.startswith("git reset"):
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr="git reset is restricted.",
+                success=False,
+                error="Restricted git command"
+            )
+
+        if git_cmd.startswith("git pull") or git_cmd.startswith("git fetch"):
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr="git pull/fetch is restricted. The repo is in a fixed state.",
+                success=False,
+                error="Restricted git command"
+            )
+
+        # Commands that might reference commits we need to check
+        commit_referencing_cmds = ["git log", "git show", "git diff", "git checkout", "git rev-parse"]
+
+        is_commit_cmd = any(git_cmd.startswith(cmd) for cmd in commit_referencing_cmds)
+        if not is_commit_cmd:
+            return None
+
+        # Handle bare commands that default to HEAD
+        if git_cmd.strip() in ["git log", "git show"]:
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr=f"{git_cmd} without arguments shows commits ahead of base_commit. "
+                       f"Use '{git_cmd} {self.task.base_commit}' or an earlier commit.",
+                success=False,
+                error="Restricted git command"
+            )
+
+        # Extract commit references from the command
+        refs = self._extract_commit_refs_from_git_cmd(git_cmd)
+
+        # Check each reference
+        for ref in refs:
+            # Skip if it's the base_commit itself or looks like a file path
+            if ref == self.task.base_commit:
+                continue
+            if ref.startswith(self.task.base_commit[:8]):
+                continue
+
+            # Check if this ref points to a commit ahead of base_commit
+            if self._is_commit_ahead_of_base(ref):
+                return BashResult(
+                    cwd=self.cwd,
+                    stdout="",
+                    stderr=f"'{ref}' references a commit ahead of base_commit ({self.task.base_commit[:8]}). "
+                           f"Only commits at or before base_commit are accessible.",
+                    success=False,
+                    error="Restricted git command"
+                )
+
+        return None
+
     async def execute_bash(self, command: str, timeout: int = DEFAULT_BASH_TIMEOUT) -> BashResult:
         """
         Execute a bash command in the container with cwd tracking.
@@ -472,37 +614,27 @@ class ContainerExecutor:
 
         command = command.strip()
 
-        # Check for blocked path access
-        blocked = self._contains_blocked_path(command)
-        if blocked:
-            return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr=f"Access denied: {blocked} is outside the allowed workspace",
-                success=False,
-                error="Blocked path access"
-            )
+        # Split compound commands by && and check each sub-command
+        # This ensures restrictions are applied to each part of a compound command
+        sub_commands = [c.strip() for c in command.split("&&")]
 
-        # Restrict git log to only show commits up to base_commit
-        # This prevents the agent from seeing the fix commit
-        if self.task and command.startswith("git log"):
-            # If the command doesn't already have a commit range, add restriction
-            if self.task.base_commit not in command and ".." not in command:
-                # Append the base_commit restriction
-                command = f"{command} {self.task.base_commit}"
-
-        # Block git show for HEAD or recent commits (could reveal fix)
-        # Allow git show for specific files or older commits
-        if self.task and command.startswith("git show"):
-            # Block if trying to show HEAD or no specific commit given
-            if "HEAD" in command or command.strip() == "git show":
+        for sub_cmd in sub_commands:
+            # Check for blocked path access on each sub-command
+            blocked = self._contains_blocked_path(sub_cmd)
+            if blocked:
                 return BashResult(
                     cwd=self.cwd,
                     stdout="",
-                    stderr="git show HEAD is restricted. Use 'git show <commit-hash>' for older commits.",
+                    stderr=f"Access denied: {blocked} is outside the allowed workspace",
                     success=False,
-                    error="Restricted git command"
+                    error="Blocked path access"
                 )
+
+            # Restrict git commands to prevent looking at commits after base_commit
+            # This prevents the agent from seeing the fix commit
+            git_restricted = self._check_git_restriction(sub_cmd)
+            if git_restricted:
+                return git_restricted
 
         # Handle cd command specially for cwd tracking
         if command == "cd" or command.startswith("cd "):
@@ -519,6 +651,9 @@ class ContainerExecutor:
 
     async def _handle_cd(self, command: str) -> BashResult:
         """Handle cd command with boundary enforcement."""
+        # 1. Store current cwd
+        old_cwd = self.cwd
+
         # Parse target directory
         parts = command.split(maxsplit=1)
         if len(parts) == 1:
@@ -527,7 +662,7 @@ class ContainerExecutor:
         else:
             target = parts[1].strip().strip("'\"")
 
-        # Handle special cases
+        # Handle special cases that we know will fail
         if target == "-":
             return BashResult(
                 cwd=self.cwd,
@@ -536,37 +671,32 @@ class ContainerExecutor:
                 success=False
             )
 
-        if target == "~" or target.startswith("~/"):
-            return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr=f"Cannot cd outside repo root ({self.repo_root})",
-                success=False
-            )
+        # 2. Execute the cd command and get the new cwd via pwd
+        cd_result = self._exec_in_container(f"cd '{target}' && pwd", timeout=10)
 
-        # Resolve the path
-        new_cwd = self._resolve_path(target)
-
-        # Check boundary
-        if not self._is_within_repo(new_cwd):
+        if not cd_result.success:
+            # cd failed (directory doesn't exist, etc.)
             return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr=f"Cannot cd outside repo root ({self.repo_root})",
-                success=False
-            )
-
-        # Verify directory exists in container
-        check_result = self._exec_in_container(f"test -d '{new_cwd}'", timeout=10)
-        if not check_result.success:
-            return BashResult(
-                cwd=self.cwd,
+                cwd=old_cwd,
                 stdout="",
                 stderr=f"bash: cd: {target}: No such file or directory",
                 success=False
             )
 
-        # Update cwd
+        new_cwd = cd_result.stdout.strip()
+
+        # 3. Check if new_cwd is within repo boundary
+        if not new_cwd.startswith(self.repo_root):
+            # Reset cwd to old_cwd and return error
+            self.cwd = old_cwd
+            return BashResult(
+                cwd=old_cwd,
+                stdout="",
+                stderr=f"Cannot cd outside repo root ({self.repo_root})",
+                success=False
+            )
+
+        # 4. Valid - update cwd and return success
         self.cwd = new_cwd
         return BashResult(
             cwd=self.cwd,
@@ -719,6 +849,141 @@ class ContainerExecutor:
             stderr=apply_result.stderr,
             error=None if apply_result.success else "Patch application failed"
         )
+
+    async def execute_debug(
+        self,
+        command: str,
+        timeout: int = DEFAULT_BASH_TIMEOUT
+    ) -> BashResult:
+        """
+        Execute a debug session in an isolated container.
+
+        This creates a temporary snapshot of the current state, runs bash commands
+        with write access (except test files), returns results, and automatically
+        rolls back (destroys the temp container).
+
+        Use this to test fixes with vim, sed, echo, etc. before submitting a patch.
+
+        Args:
+            command: Bash command to run (can modify files)
+            timeout: Command timeout in seconds
+
+        Returns:
+            BashResult with {cwd, stdout, stderr, success}
+        """
+        if not self._started or not self.container_id:
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr="Container not started",
+                success=False,
+                error="Container not started"
+            )
+
+        temp_image = None
+        temp_container = None
+
+        try:
+            # Step 1: Create a temporary image from current container state
+            temp_image = f"debug-snapshot-{uuid.uuid4().hex[:8]}"
+            commit_result = subprocess.run(
+                ["docker", "commit", self.container_id, temp_image],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if commit_result.returncode != 0:
+                return BashResult(
+                    cwd=self.cwd,
+                    stdout="",
+                    stderr=f"Failed to create debug snapshot: {commit_result.stderr}",
+                    success=False,
+                    error="Debug snapshot failed"
+                )
+
+            # Step 2: Start a temporary container from the snapshot
+            run_result = subprocess.run(
+                [
+                    "docker", "run", "-d",
+                    "--memory", DEFAULT_CONTAINER_MEMORY,
+                    "--cpus", DEFAULT_CONTAINER_CPUS,
+                    temp_image,
+                    "tail", "-f", "/dev/null"  # Keep container running
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if run_result.returncode != 0:
+                return BashResult(
+                    cwd=self.cwd,
+                    stdout="",
+                    stderr=f"Failed to start debug container: {run_result.stderr}",
+                    success=False,
+                    error="Debug container failed"
+                )
+            temp_container = run_result.stdout.strip()
+
+            # Step 3: Enable write permissions (except test files)
+            subprocess.run(
+                ["docker", "exec", temp_container, "chmod", "-R", "u+w", REPO_ROOT],
+                capture_output=True,
+                timeout=60
+            )
+
+            # Re-protect test files
+            for test_file in self.protected_test_files:
+                subprocess.run(
+                    ["docker", "exec", temp_container, "chmod", "a-w", f"{REPO_ROOT}/{test_file}"],
+                    capture_output=True,
+                    timeout=10
+                )
+
+            # Step 4: Execute the command (with write access to source files)
+            exec_result = subprocess.run(
+                ["docker", "exec", "-w", self.cwd, temp_container, "bash", "-c", command],
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+
+            return BashResult(
+                cwd=self.cwd,
+                stdout=exec_result.stdout,
+                stderr=exec_result.stderr,
+                success=exec_result.returncode == 0
+            )
+
+        except subprocess.TimeoutExpired:
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr=f"Debug command timed out after {timeout}s",
+                success=False,
+                error="Timeout"
+            )
+        except Exception as e:
+            return BashResult(
+                cwd=self.cwd,
+                stdout="",
+                stderr=str(e),
+                success=False,
+                error=str(e)
+            )
+        finally:
+            # Step 5: Cleanup - destroy temp container and image
+            if temp_container:
+                subprocess.run(
+                    ["docker", "rm", "-f", temp_container],
+                    capture_output=True,
+                    timeout=30
+                )
+            if temp_image:
+                subprocess.run(
+                    ["docker", "rmi", "-f", temp_image],
+                    capture_output=True,
+                    timeout=30
+                )
 
     async def stop(self):
         """Stop and remove the container."""

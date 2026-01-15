@@ -418,6 +418,52 @@ class Agent:
                             "error": f"Failed to send bash result: {e}"
                         }
 
+                elif action == "debug":
+                    # Debug action: run bash commands in an isolated container with write access
+                    # Content is the bash command to run (can modify files, changes are rolled back)
+                    await updater.update_status(
+                        TaskState.working,
+                        new_agent_text_message(f"[Turn {turn}] Running debug session..."),
+                    )
+
+                    debug_command = content if content else "echo 'No command specified'"
+
+                    debug_result = await self.container.execute_debug(
+                        command=debug_command,
+                        timeout=bash_timeout
+                    )
+
+                    # Format response
+                    debug_output = {
+                        "debug_result": True,
+                        "cwd": debug_result.cwd,
+                        "stdout": debug_result.stdout,
+                        "stderr": debug_result.stderr,
+                        "success": debug_result.success,
+                        "note": "This was a debug session. Changes were NOT applied to the main environment."
+                    }
+
+                    conversation_history.append({
+                        "turn": turn,
+                        "role": "green",
+                        "type": "debug_result",
+                        "cwd": debug_result.cwd,
+                        "content": debug_result.stdout[:200] if debug_result.stdout else debug_result.stderr[:200],
+                    })
+
+                    # Send debug output back to solver
+                    try:
+                        response = await self.messenger.talk_to_agent(
+                            json.dumps(debug_output), solver_url, new_conversation=False, timeout=120
+                        )
+                    except Exception as e:
+                        return {
+                            "patch": None,
+                            "turns": turn,
+                            "conversation_history": conversation_history,
+                            "error": f"Failed to send debug result: {e}"
+                        }
+
                 else:
                     # Unknown or no action - prompt solver to respond properly
                     await updater.update_status(
@@ -434,7 +480,7 @@ class Agent:
 
                     error_feedback = {
                         "error": "Invalid response format",
-                        "message": "Please respond with JSON: {\"action\": \"bash\"|\"patch\", \"content\": \"...\"}",
+                        "message": "Please respond with JSON: {\"action\": \"bash\"|\"patch\"|\"debug\", \"content\": \"...\"}",
                         "cwd": self.container.cwd
                     }
 
