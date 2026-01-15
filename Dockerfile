@@ -15,6 +15,7 @@ RUN adduser --disabled-password --gecos "" agent
 WORKDIR /home/agent
 COPY pyproject.toml uv.lock README.md ./
 COPY src src
+COPY docker docker
 
 # ---- Install Python dependencies via uv ----
 RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1000 \
