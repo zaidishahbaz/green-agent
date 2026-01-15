@@ -344,6 +344,10 @@ class Agent:
                     if patch_result.success:
                         # Patch applied successfully
                         patch = content
+                        print(f"✅ PATCH APPLIED SUCCESSFULLY (Turn {turn})")
+                        print(f"{'='*60}")
+                        print(f"Patch content preview:\n{content[:500]}...")
+                        print(f"{'='*60}\n")
                         await updater.update_status(
                             TaskState.working,
                             new_agent_text_message(f"[Turn {turn}] Patch applied successfully"),
@@ -572,6 +576,16 @@ class Agent:
                     result_entry["validation"] = validation
                     result_entry["status"] = "validated"
                     result_entry["score"] = validation.get("score", 0.0)
+
+                    # Log validation results
+                    print(f"🧪 VALIDATION RESULTS for {task.instance_id}")
+                    print(f"{'='*60}")
+                    print(f"Score: {validation.get('score', 0.0):.2%}")
+                    print(f"Tests passed: {validation.get('tests_passed', 0)}")
+                    print(f"Tests failed: {validation.get('tests_failed', 0)}")
+                    if validation.get('score', 0.0) == 1.0:
+                        print(f"🎉 ALL TESTS PASSED!")
+                    print(f"{'='*60}\n")
                 else:
                     result_entry["status"] = "no_patch"
                     result_entry["score"] = 0.0
@@ -614,6 +628,15 @@ class Agent:
             f"- Average score: {avg_score:.2%}\n"
             f"- Average turns: {avg_turns:.1f}"
         )
+
+        # Print final summary to console
+        print(f"\n{'#'*60}")
+        print(f"{'#'*60}")
+        print(f"##  FINAL EVALUATION SUMMARY")
+        print(f"{'#'*60}")
+        print(summary_text)
+        print(f"{'#'*60}")
+        print(f"{'#'*60}\n")
 
         await updater.add_artifact(
             parts=[

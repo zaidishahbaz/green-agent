@@ -14,13 +14,13 @@ cwd = "../.."  # green-agent root
 [participants.solver]
 url = "http://localhost:9010"
 command = "uv run python -m server"
-cwd = "/Users/soumyabatra/Documents/purple-swebench"
+cwd = "/Users/zaidishahbaz/Desktop/side/agentsbeat/purple-swebench"
 
 [config]
 # Evaluation configuration passed to the green agent
 max_tasks = 1
-repo = "psf/requests"
+repo = "sympy/sympy"
+instance_id = "sympy__sympy-20916"
 # Optional filters:
-# instance_id = "django__django-11099"  # Specific task
 # repo = "django/django"                 # Filter by repo
 # difficulty = "easy"                    # Filter by difficulty

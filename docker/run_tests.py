@@ -218,7 +218,11 @@ def main():
     base_commit = task.get("base_commit")
     environment_setup_commit = task.get("environment_setup_commit", base_commit)
     patch = task.get("patch", "")
-    tests = task.get("tests", [])
+    test_patch = task.get("test_patch", "")
+    fail_to_pass = task.get("fail_to_pass", [])
+    pass_to_pass = task.get("pass_to_pass", [])
+    # Support legacy "tests" field for backward compatibility
+    tests = task.get("tests", []) or (fail_to_pass + pass_to_pass)
     timeout_per_test = task.get("timeout_per_test", 120)
 
     if not repo or not base_commit:
@@ -272,19 +276,49 @@ def main():
     else:
         result["patch_applied"] = True  # No patch needed
 
-    # Step 5: Run tests
-    for test in tests:
+    # Step 5: Apply test_patch (test file changes for evaluation)
+    if test_patch:
+        success, error = apply_patch(test_patch, workspace)
+        if not success:
+            result["errors"].append(f"Test patch: {error}")
+            # Continue anyway, tests might still work
+
+    # Step 6: Run tests
+    fail_to_pass_results = {}
+    pass_to_pass_results = {}
+
+    for test in fail_to_pass:
         test_result = run_test(test, workspace, timeout=timeout_per_test)
+        fail_to_pass_results[test] = test_result
         result["test_results"][test] = test_result
 
+    for test in pass_to_pass:
+        test_result = run_test(test, workspace, timeout=timeout_per_test)
+        pass_to_pass_results[test] = test_result
+        result["test_results"][test] = test_result
+
+    result["fail_to_pass_results"] = fail_to_pass_results
+    result["pass_to_pass_results"] = pass_to_pass_results
+
     # Calculate summary
-    passed = sum(1 for r in result["test_results"].values() if r["passed"])
-    total = len(result["test_results"])
+    f2p_passed = sum(1 for r in fail_to_pass_results.values() if r["passed"])
+    f2p_total = len(fail_to_pass_results)
+    p2p_passed = sum(1 for r in pass_to_pass_results.values() if r["passed"])
+    p2p_total = len(pass_to_pass_results)
+
+    passed = f2p_passed + p2p_passed
+    total = f2p_total + p2p_total
     result["summary"] = {
         "passed": passed,
         "failed": total - passed,
         "total": total,
         "score": passed / total if total > 0 else 0.0,
+        "fail_to_pass_passed": f2p_passed,
+        "fail_to_pass_total": f2p_total,
+        "fail_to_pass_score": f2p_passed / f2p_total if f2p_total > 0 else 0.0,
+        "pass_to_pass_passed": p2p_passed,
+        "pass_to_pass_total": p2p_total,
+        "pass_to_pass_score": p2p_passed / p2p_total if p2p_total > 0 else 0.0,
     }
 
     print(json.dumps(result))
