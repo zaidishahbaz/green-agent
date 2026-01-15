@@ -12,12 +12,8 @@ This agent:
 import json
 import re
 import time
-import httpx
 from typing import Any
 from pydantic import BaseModel, HttpUrl, ValidationError
-
-# Leaderboard webhook URL
-WEBHOOK_URL = "https://agentbeats.dev/api/hook/v2/019bc010-eb15-7fd2-8891-f34a5c86467c"
 from a2a.server.tasks import TaskUpdater
 from a2a.types import Message, TaskState, Part, TextPart, DataPart
 from a2a.utils import get_message_text, new_agent_text_message
@@ -590,12 +586,6 @@ class Agent:
                     if validation.get('score', 0.0) == 1.0:
                         print(f"🎉 ALL TESTS PASSED!")
                     print(f"{'='*60}\n")
-
-                    # Send results to leaderboard webhook
-                    try:
-                        httpx.post(WEBHOOK_URL, json=result_entry, timeout=10)
-                    except Exception as e:
-                        print(f"[Webhook] Failed to send results: {e}")
                 else:
                     result_entry["status"] = "no_patch"
                     result_entry["score"] = 0.0
