@@ -267,6 +267,8 @@ class Agent:
             new_agent_text_message(f"Starting container for {task.instance_id}..."),
         )
 
+        task.apply_test_patch = True # Apply test patch if available when setting up task
+        task.run_tests = True # Get baseline tests run in container
         success, error = await self.container.start(task)
         if not success:
             return {
