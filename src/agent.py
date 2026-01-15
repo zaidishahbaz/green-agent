@@ -419,24 +419,16 @@ class Agent:
                         }
 
                 elif action == "debug":
-                    # Debug action: test a patch in an isolated container
-                    # Content should be JSON: {"patch": "...", "command": "..."}
+                    # Debug action: run bash commands in an isolated container with write access
+                    # Content is the bash command to run (can modify files, changes are rolled back)
                     await updater.update_status(
                         TaskState.working,
                         new_agent_text_message(f"[Turn {turn}] Running debug session..."),
                     )
 
-                    try:
-                        debug_data = json.loads(content) if isinstance(content, str) else content
-                        debug_patch = debug_data.get("patch", "")
-                        debug_command = debug_data.get("command", "echo 'No command specified'")
-                    except (json.JSONDecodeError, TypeError):
-                        # If content is not JSON, treat it as the command with no patch
-                        debug_patch = ""
-                        debug_command = content if content else "echo 'No command specified'"
+                    debug_command = content if content else "echo 'No command specified'"
 
                     debug_result = await self.container.execute_debug(
-                        patch=debug_patch,
                         command=debug_command,
                         timeout=bash_timeout
                     )

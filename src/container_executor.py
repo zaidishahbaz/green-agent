@@ -651,6 +651,9 @@ class ContainerExecutor:
 
     async def _handle_cd(self, command: str) -> BashResult:
         """Handle cd command with boundary enforcement."""
+        # 1. Store current cwd
+        old_cwd = self.cwd
+
         # Parse target directory
         parts = command.split(maxsplit=1)
         if len(parts) == 1:
@@ -659,7 +662,7 @@ class ContainerExecutor:
         else:
             target = parts[1].strip().strip("'\"")
 
-        # Handle special cases
+        # Handle special cases that we know will fail
         if target == "-":
             return BashResult(
                 cwd=self.cwd,
@@ -668,37 +671,32 @@ class ContainerExecutor:
                 success=False
             )
 
-        if target == "~" or target.startswith("~/"):
-            return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr=f"Cannot cd outside repo root ({self.repo_root})",
-                success=False
-            )
+        # 2. Execute the cd command and get the new cwd via pwd
+        cd_result = self._exec_in_container(f"cd '{target}' && pwd", timeout=10)
 
-        # Resolve the path
-        new_cwd = self._resolve_path(target)
-
-        # Check boundary
-        if not self._is_within_repo(new_cwd):
+        if not cd_result.success:
+            # cd failed (directory doesn't exist, etc.)
             return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr=f"Cannot cd outside repo root ({self.repo_root})",
-                success=False
-            )
-
-        # Verify directory exists in container
-        check_result = self._exec_in_container(f"test -d '{new_cwd}'", timeout=10)
-        if not check_result.success:
-            return BashResult(
-                cwd=self.cwd,
+                cwd=old_cwd,
                 stdout="",
                 stderr=f"bash: cd: {target}: No such file or directory",
                 success=False
             )
 
-        # Update cwd
+        new_cwd = cd_result.stdout.strip()
+
+        # 3. Check if new_cwd is within repo boundary
+        if not new_cwd.startswith(self.repo_root):
+            # Reset cwd to old_cwd and return error
+            self.cwd = old_cwd
+            return BashResult(
+                cwd=old_cwd,
+                stdout="",
+                stderr=f"Cannot cd outside repo root ({self.repo_root})",
+                success=False
+            )
+
+        # 4. Valid - update cwd and return success
         self.cwd = new_cwd
         return BashResult(
             cwd=self.cwd,
@@ -854,22 +852,20 @@ class ContainerExecutor:
 
     async def execute_debug(
         self,
-        patch: str,
         command: str,
         timeout: int = DEFAULT_BASH_TIMEOUT
     ) -> BashResult:
         """
         Execute a debug session in an isolated container.
 
-        This creates a temporary snapshot of the current state, applies a patch,
-        runs a command with write access (except test files), returns results,
-        and automatically rolls back (destroys the temp container).
+        This creates a temporary snapshot of the current state, runs bash commands
+        with write access (except test files), returns results, and automatically
+        rolls back (destroys the temp container).
 
-        Use this to test patches before committing them.
+        Use this to test fixes with vim, sed, echo, etc. before submitting a patch.
 
         Args:
-            patch: Git diff patch to apply
-            command: Bash command to run after applying patch
+            command: Bash command to run (can modify files)
             timeout: Command timeout in seconds
 
         Returns:
@@ -883,19 +879,6 @@ class ContainerExecutor:
                 success=False,
                 error="Container not started"
             )
-
-        # Check if patch tries to modify protected test files
-        if patch:
-            patch_files = self._extract_files_from_patch(patch)
-            protected_violations = [f for f in patch_files if f in self.protected_test_files]
-            if protected_violations:
-                return BashResult(
-                    cwd=self.cwd,
-                    stdout="",
-                    stderr=f"Cannot modify protected test files: {', '.join(protected_violations)}",
-                    success=False,
-                    error="Protected file modification attempted"
-                )
 
         temp_image = None
         temp_container = None
@@ -956,38 +939,7 @@ class ContainerExecutor:
                     timeout=10
                 )
 
-            # Step 4: Apply patch if provided
-            if patch and patch.strip():
-                patch_file = f"{AGENT_TEMP_DIR}/debug_patch.diff"
-
-                # Write patch to file
-                write_proc = subprocess.run(
-                    ["docker", "exec", "-i", temp_container, "tee", patch_file],
-                    input=patch,
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-
-                if write_proc.returncode == 0:
-                    # Apply the patch
-                    apply_result = subprocess.run(
-                        ["docker", "exec", "-w", REPO_ROOT, temp_container,
-                         "git", "apply", "--whitespace=fix", patch_file],
-                        capture_output=True,
-                        text=True,
-                        timeout=60
-                    )
-                    if apply_result.returncode != 0:
-                        return BashResult(
-                            cwd=self.cwd,
-                            stdout="",
-                            stderr=f"Debug patch failed: {apply_result.stderr}",
-                            success=False,
-                            error="Debug patch failed"
-                        )
-
-            # Step 5: Execute the command
+            # Step 4: Execute the command (with write access to source files)
             exec_result = subprocess.run(
                 ["docker", "exec", "-w", self.cwd, temp_container, "bash", "-c", command],
                 capture_output=True,
@@ -1019,7 +971,7 @@ class ContainerExecutor:
                 error=str(e)
             )
         finally:
-            # Step 6: Cleanup - destroy temp container and image
+            # Step 5: Cleanup - destroy temp container and image
             if temp_container:
                 subprocess.run(
                     ["docker", "rm", "-f", temp_container],

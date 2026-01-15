@@ -8,12 +8,12 @@
 
 [green]
 url = "http://localhost:9009"
-command = "uv run python -m server"
+command = "uv run python src/server.py --host 127.0.0.1 --port 9009"
 cwd = "../.."  # green-agent root
 
 [participants.solver]
 url = "http://localhost:9010"
-command = "uv run python -m server"
+command = "uv run python src/server.py --host 127.0.0.1 --port 9010"
 cwd = "/Users/zaidishahbaz/Desktop/side/agentsbeat/purple-swebench"
 
 [config]
