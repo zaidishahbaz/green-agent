@@ -173,35 +173,87 @@ def is_simple_test_name(test_name):
     return False
 
 
-def run_test(test_name, repo_dir, timeout=120):
-    """Run a single test and return result."""
-    framework = detect_test_framework(repo_dir)
+def get_test_command(repo, version, test_name):
+    """
+    Get the command to run a specific individual test for a repo.
 
-    if framework == "django":
-        # Django uses tests/runtests.py
+    Args:
+        repo: Repository name (e.g., "django/django")
+        version: Version string (e.g., "3.0")
+        test_name: Test identifier from SWE-bench
+
+    Returns:
+        List of command arguments to run the test
+    """
+    try:
+        ver = float(version) if version else 0.0
+    except (ValueError, TypeError):
+        ver = 0.0
+
+    if repo == "django/django":
+        # Django uses tests/runtests.py with a specific format
         django_test = convert_unittest_to_django(test_name)
+        if ver == 1.9:
+            return ["python", "tests/runtests.py", django_test, "-v", "2"]
+        else:
+            return ["python", "tests/runtests.py", "--settings=test_sqlite", "--parallel", "1", django_test, "-v", "2"]
 
-        # Run Django tests using runtests.py
-        code, stdout, stderr = run_command(
-            ["python", "tests/runtests.py", django_test, "-v", "2"],
-            cwd=repo_dir,
-            timeout=timeout
-        )
-    elif is_simple_test_name(test_name):
-        # Simple test name like "test_super_sub" - use pytest -k for keyword match
-        code, stdout, stderr = run_command(
-            ["python", "-m", "pytest", "-k", test_name, "-xvs", "--tb=short"],
-            cwd=repo_dir,
-            timeout=timeout
-        )
-    else:
-        # Use pytest
+    elif repo == "sympy/sympy":
+        # SymPy uses bin/test with specific flags
+        return ["bin/test", "-C", "--verbose", test_name]
+
+    elif repo == "sphinx-doc/sphinx":
+        # Sphinx uses tox
         pytest_test = convert_test_name_for_pytest(test_name)
-        code, stdout, stderr = run_command(
-            ["python", "-m", "pytest", pytest_test, "-xvs", "--tb=short"],
+        return ["tox", "--current-env", "-epy39", "-v", "--", pytest_test]
+
+    elif repo == "astropy/astropy":
+        pytest_test = convert_test_name_for_pytest(test_name)
+        return ["python", "-m", "pytest", "-rA", "-vv", "-o", "console_output_style=classic", "--tb=short", pytest_test]
+
+    elif repo in ("matplotlib/matplotlib", "scikit-learn/scikit-learn", "pallets/flask",
+                  "pydata/xarray", "pytest-dev/pytest", "psf/requests", "pylint-dev/pylint"):
+        pytest_test = convert_test_name_for_pytest(test_name)
+        return ["python", "-m", "pytest", "-rA", "-xvs", "--tb=short", pytest_test]
+
+    elif repo == "mwaskom/seaborn":
+        pytest_test = convert_test_name_for_pytest(test_name)
+        return ["python", "-m", "pytest", "--no-header", "-rA", "-xvs", "--tb=short", pytest_test]
+
+    # Default: use pytest with smart test name handling
+    if is_simple_test_name(test_name):
+        # Simple test name like "test_foo" - use -k for keyword match
+        return ["python", "-m", "pytest", "-k", test_name, "-xvs", "--tb=short"]
+    else:
+        # Try to convert to pytest format
+        pytest_test = convert_test_name_for_pytest(test_name)
+        return ["python", "-m", "pytest", pytest_test, "-xvs", "--tb=short"]
+
+
+def run_test(test_name, repo_dir, repo="", version="", timeout=120):
+    """Run a single test and return result."""
+    # Get repo-specific test command
+    cmd = get_test_command(repo, version, test_name)
+
+    # Handle environment variables for sympy
+    env = os.environ.copy()
+    if repo == "sympy/sympy":
+        env["PYTHONWARNINGS"] = "ignore::UserWarning,ignore::SyntaxWarning"
+
+    try:
+        result = subprocess.run(
+            cmd,
             cwd=repo_dir,
-            timeout=timeout
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
         )
+        code, stdout, stderr = result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        code, stdout, stderr = -1, "", f"Command timed out after {timeout}s"
+    except Exception as e:
+        code, stdout, stderr = -1, "", str(e)
 
     return {
         "name": test_name,
@@ -232,6 +284,7 @@ def main():
     # Extract task fields
     instance_id = task.get("instance_id", "unknown")
     repo = task.get("repo")
+    version = task.get("version", "")
     base_commit = task.get("base_commit")
     environment_setup_commit = task.get("environment_setup_commit", base_commit)
     patch = task.get("patch", "")
@@ -305,12 +358,12 @@ def main():
     pass_to_pass_results = {}
 
     for test in fail_to_pass:
-        test_result = run_test(test, workspace, timeout=timeout_per_test)
+        test_result = run_test(test, workspace, repo=repo, version=version, timeout=timeout_per_test)
         fail_to_pass_results[test] = test_result
         result["test_results"][test] = test_result
 
     for test in pass_to_pass:
-        test_result = run_test(test, workspace, timeout=timeout_per_test)
+        test_result = run_test(test, workspace, repo=repo, version=version, timeout=timeout_per_test)
         pass_to_pass_results[test] = test_result
         result["test_results"][test] = test_result
 

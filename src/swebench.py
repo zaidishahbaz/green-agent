@@ -23,6 +23,8 @@ class SWEBenchTask:
     fail_to_pass: list[str]
     pass_to_pass: list[str]
     difficulty: str
+    run_tests: bool = False
+    apply_test_patch: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "SWEBenchTask":

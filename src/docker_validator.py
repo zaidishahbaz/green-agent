@@ -5,10 +5,10 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 # Python version mapping for SWE-bench repositories
 # Based on official SWE-bench harness constants:
 # https://github.com/swe-bench/SWE-bench/blob/main/swebench/harness/constants/python.py
+
 
 def get_python_version(repo: str, version: str) -> str:
     """
@@ -83,6 +83,28 @@ def get_python_version(repo: str, version: str) -> str:
     return "3.9"
 
 
+def get_debian_version(python_version: str) -> str:
+    """
+    Get the appropriate Debian version for a Python version.
+    Older Python versions require older Debian releases.
+
+    - Python 3.5, 3.6, 3.7 → buster (Debian 10)
+    - Python 3.8, 3.9 → bullseye (Debian 11)
+    - Python 3.10, 3.11+ → bookworm (Debian 12)
+    """
+    try:
+        ver = float(python_version)
+    except (ValueError, TypeError):
+        ver = 3.9
+
+    if ver <= 3.7:
+        return "buster"
+    elif ver <= 3.9:
+        return "bullseye"
+    else:
+        return "bookworm"
+
+
 # Legacy mapping for backward compatibility (uses Python 3.9 for all)
 REPO_PYTHON_VERSIONS = {
     "astropy/astropy": "3.9",
@@ -106,12 +128,17 @@ DEFAULT_IMAGE = "swebench-runner"
 @dataclass
 class DockerTestResult:
     """Result from running tests in Docker."""
+
     instance_id: str
     patch_applied: bool = False
     install_success: bool = False
     test_results: dict = field(default_factory=dict)
-    fail_to_pass_results: dict = field(default_factory=dict)  # Results for fail_to_pass tests
-    pass_to_pass_results: dict = field(default_factory=dict)  # Results for pass_to_pass tests
+    fail_to_pass_results: dict = field(
+        default_factory=dict
+    )  # Results for fail_to_pass tests
+    pass_to_pass_results: dict = field(
+        default_factory=dict
+    )  # Results for pass_to_pass tests
     errors: list = field(default_factory=list)
     summary: dict = field(default_factory=dict)
 
@@ -147,16 +174,27 @@ class DockerValidator:
 
     def build_image(self, python_version: str = "3.9") -> tuple[bool, str]:
         """Build the SWE-bench runner Docker image."""
-        dockerfile_path = Path(__file__).parent.parent / "docker" / "Dockerfile.swebench"
+        dockerfile_path = (
+            Path(__file__).parent.parent / "docker" / "Dockerfile.swebench"
+        )
 
         if not dockerfile_path.exists():
             return False, f"Dockerfile not found: {dockerfile_path}"
 
+        # Get the appropriate Debian version for this Python version
+        debian_version = get_debian_version(python_version)
+
         cmd = [
-            "docker", "build",
-            "-f", str(dockerfile_path),
-            "--build-arg", f"PYTHON_VERSION={python_version}",
-            "-t", f"{self.image_name}:{python_version}",
+            "docker",
+            "build",
+            "-f",
+            str(dockerfile_path),
+            "--build-arg",
+            f"PYTHON_VERSION={python_version}",
+            "--build-arg",
+            f"DEBIAN_VERSION={debian_version}",
+            "-t",
+            f"{self.image_name}:{python_version}",
             str(dockerfile_path.parent.parent),
         ]
 
@@ -230,8 +268,7 @@ class DockerValidator:
         success, error = self.ensure_image(python_version)
         if not success:
             return DockerTestResult(
-                instance_id=instance_id,
-                errors=[f"Image build failed: {error}"]
+                instance_id=instance_id, errors=[f"Image build failed: {error}"]
             )
 
         # Prepare task input
@@ -243,6 +280,8 @@ class DockerValidator:
             "patch": patch,
             "fail_to_pass": fail_to_pass,
             "pass_to_pass": pass_to_pass or [],
+            "run_tests": True,
+            "apply_test_patch": False,
             "test_patch": test_patch,
             "timeout_per_test": timeout_per_test,
         }
@@ -250,11 +289,14 @@ class DockerValidator:
         # Run container
         # Note: Network access is needed for git clone
         cmd = [
-            "docker", "run",
+            "docker",
+            "run",
             "--rm",
             "-i",
-            "--memory", "4g",
-            "--cpus", "2",
+            "--memory",
+            "4g",
+            "--cpus",
+            "2",
             f"{self.image_name}:{python_version}",
         ]
 
@@ -266,6 +308,7 @@ class DockerValidator:
                 text=True,
                 timeout=timeout,
             )
+            
 
             # Parse output
             try:
@@ -283,19 +326,16 @@ class DockerValidator:
             except json.JSONDecodeError:
                 return DockerTestResult(
                     instance_id=instance_id,
-                    errors=[f"Invalid container output: {result.stdout[:500]}"]
+                    errors=[f"Invalid container output: {result.stdout[:500]}"],
                 )
 
         except subprocess.TimeoutExpired:
             return DockerTestResult(
                 instance_id=instance_id,
-                errors=[f"Container timed out after {timeout}s"]
+                errors=[f"Container timed out after {timeout}s"],
             )
         except Exception as e:
-            return DockerTestResult(
-                instance_id=instance_id,
-                errors=[str(e)]
-            )
+            return DockerTestResult(instance_id=instance_id, errors=[str(e)])
 
     def validate_task(
         self,
@@ -318,11 +358,6 @@ class DockerValidator:
         """
         pass_to_pass_tests = task.pass_to_pass if include_pass_to_pass else None
 
-        if include_pass_to_pass and task.pass_to_pass:
-            print(f"[Validator] Running {len(task.fail_to_pass)} fail_to_pass + {len(task.pass_to_pass)} pass_to_pass tests")
-        else:
-            print(f"[Validator] Running {len(task.fail_to_pass)} fail_to_pass tests")
-
         return self.run_validation(
             instance_id=task.instance_id,
             repo=task.repo,
@@ -330,7 +365,7 @@ class DockerValidator:
             patch=patch,
             fail_to_pass=list(task.fail_to_pass),
             pass_to_pass=list(pass_to_pass_tests) if pass_to_pass_tests else None,
-            test_patch=task.test_patch if hasattr(task, 'test_patch') else None,
+            test_patch=task.test_patch if hasattr(task, "test_patch") else None,
             timeout=timeout,
             environment_setup_commit=task.environment_setup_commit,
             version=task.version,

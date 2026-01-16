@@ -45,10 +45,178 @@ BLOCKED_PATHS = (
 DEFAULT_CONTAINER_MEMORY = "4g"
 DEFAULT_CONTAINER_CPUS = "2"
 
+# Test Command mapping for SWE-bench repositories
+# Based on official SWE-bench harness constants:
+# https://github.com/swe-bench/SWE-bench/blob/main/swebench/harness/constants/python.py
+
+
+def get_test_command(repo: str, version: str) -> str:
+    """
+    Get the appropriate test command for a repo/version combination.
+    Based on official SWE-bench harness specifications.
+    """
+    try:
+        ver = float(version)
+    except (ValueError, TypeError):
+        ver = 0.0
+
+    if repo == "django/django":
+        if ver == 1.9:
+            return "./tests/runtests.py --verbosity 2"
+        else:
+            return (
+                "./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1"
+            )
+
+    elif repo == "astropy/astropy":
+        return "pytest -rA -vv -o console_output_style=classic --tb=no"
+
+    elif repo == "sympy/sympy":
+        return "PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' bin/test -C --verbose"
+
+    elif repo == "sphinx-doc/sphinx":
+        return "tox --current-env -epy39 -v --"
+    
+    elif repo == "mwaskom/seaborn":
+        return "pytest --no-header -rA"
+    
+    elif repo in (
+        "matplotlib/matplotlib",
+        "scikit-learn/scikit-learn",
+        "pallets/flask",
+        "pydata/xarray",
+        "pytest-dev/pytest",
+        "psf/requests",
+        "pylint-dev/pylint"
+    ):
+        return "pytest -rA"
+
+    # Fallback
+    return "pytest -rA"
+
+
+def convert_unittest_to_django(test_name: str) -> str:
+    """Convert unittest-style test name to Django runtests.py format.
+
+    Input:  "test_method (module.ClassName)"
+    Output: "module.ClassName.test_method"
+    """
+    match = re.match(r'(\w+)\s+\(([^)]+)\)', test_name)
+    if match:
+        method, path = match.groups()
+        return f"{path}.{method}"
+    return test_name
+
+
+def convert_unittest_to_pytest(test_name: str) -> str:
+    """Convert unittest-style test name to pytest format.
+
+    Input:  "test_method (module.ClassName)"
+    Output: "module.py::ClassName::test_method"
+    """
+    match = re.match(r'(\w+)\s+\(([^)]+)\)', test_name)
+    if match:
+        method, path = match.groups()
+        parts = path.rsplit('.', 1)
+        if len(parts) == 2:
+            module, classname = parts
+            # Convert module path to file path
+            filepath = module.replace('.', '/') + '.py'
+            return f"{filepath}::{classname}::{method}"
+    return test_name
+
+
+def is_simple_test_name(test_name: str) -> bool:
+    """Check if test name is just a function name (no path info)."""
+    # Simple test names: test_foo, test_bar_baz
+    return bool(re.match(r'^test_\w+$', test_name))
+
+
+def get_individual_test_command(repo: str, version: str, test_name: str, python_bin: str = "python") -> str:
+    """
+    Get the command to run a specific individual test for a repo.
+
+    Args:
+        repo: Repository name (e.g., "django/django")
+        version: Version string (e.g., "3.0")
+        test_name: Test identifier from SWE-bench
+        python_bin: Python binary path (default: "python")
+
+    Returns:
+        Full command string to run the test
+    """
+    if repo == "django/django":
+        # Django uses tests/runtests.py with a specific format
+        django_test = convert_unittest_to_django(test_name)
+        try:
+            ver = float(version)
+        except (ValueError, TypeError):
+            ver = 0.0
+        if ver == 1.9:
+            return f"{python_bin} tests/runtests.py {django_test} -v 2"
+        else:
+            return f"{python_bin} tests/runtests.py --settings=test_sqlite --parallel 1 {django_test} -v 2"
+
+    elif repo == "sympy/sympy":
+        # SymPy uses bin/test with specific flags
+        # Test names are usually like "sympy/core/tests/test_basic.py"
+        return f"PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' bin/test -C --verbose {test_name}"
+
+    elif repo == "sphinx-doc/sphinx":
+        # Sphinx uses tox
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"tox --current-env -epy39 -v -- {pytest_test}"
+
+    elif repo == "astropy/astropy":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -vv -o console_output_style=classic --tb=short {pytest_test}"
+
+    elif repo == "matplotlib/matplotlib":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
+
+    elif repo == "scikit-learn/scikit-learn":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
+
+    elif repo == "pallets/flask":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
+
+    elif repo == "pydata/xarray":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
+
+    elif repo == "pytest-dev/pytest":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
+
+    elif repo == "psf/requests":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
+
+    elif repo == "pylint-dev/pylint":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
+
+    elif repo == "mwaskom/seaborn":
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest --no-header -rA -xvs --tb=short {pytest_test}"
+
+    # Default: use pytest with smart test name handling
+    if is_simple_test_name(test_name):
+        # Simple test name like "test_foo" - use -k for keyword match
+        return f"{python_bin} -m pytest -k {test_name} -xvs --tb=short"
+    else:
+        # Try to convert to pytest format
+        pytest_test = convert_unittest_to_pytest(test_name)
+        return f"{python_bin} -m pytest {pytest_test} -xvs --tb=short"
+
 
 @dataclass
 class BashResult:
     """Result from executing a bash command in the container."""
+
     cwd: str
     stdout: str
     stderr: str
@@ -59,6 +227,7 @@ class BashResult:
 @dataclass
 class PatchResult:
     """Result from applying a patch in the container."""
+
     success: bool
     cwd: str
     stdout: str
@@ -92,9 +261,9 @@ class ContainerExecutor:
         """Extract file paths from a unified diff patch."""
         files = []
         # Match lines like "+++ b/path/to/file.py" or "+++ path/to/file.py"
-        for match in re.finditer(r'^\+\+\+ (?:b/)?(.+)$', patch, re.MULTILINE):
+        for match in re.finditer(r"^\+\+\+ (?:b/)?(.+)$", patch, re.MULTILINE):
             filepath = match.group(1).strip()
-            if filepath and filepath != '/dev/null':
+            if filepath and filepath != "/dev/null":
                 files.append(filepath)
         return files
 
@@ -108,7 +277,7 @@ class ContainerExecutor:
                 ["docker", "inspect", "-f", "{{.State.Running}}", self.container_id],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
             )
             return result.stdout.strip() == "true"
         except Exception:
@@ -119,7 +288,7 @@ class ContainerExecutor:
         # Check if image exists
         result = subprocess.run(
             ["docker", "image", "inspect", f"{self.image_name}:{self.python_version}"],
-            capture_output=True
+            capture_output=True,
         )
         if result.returncode == 0:
             return True, ""
@@ -132,10 +301,14 @@ class ContainerExecutor:
         try:
             result = subprocess.run(
                 [
-                    "docker", "build",
-                    "-f", str(dockerfile_path),
-                    "--build-arg", f"PYTHON_VERSION={self.python_version}",
-                    "-t", f"{self.image_name}:{self.python_version}",
+                    "docker",
+                    "build",
+                    "-f",
+                    str(dockerfile_path),
+                    "--build-arg",
+                    f"PYTHON_VERSION={self.python_version}",
+                    "-t",
+                    f"{self.image_name}:{self.python_version}",
                     str(dockerfile_path.parent.parent),
                 ],
                 capture_output=True,
@@ -149,6 +322,61 @@ class ContainerExecutor:
             return False, "Build timed out"
         except Exception as e:
             return False, str(e)
+
+    def _get_venv_python(self, repo_dir: Path) -> str:
+        """Get the path to the venv python executable."""
+        venv_python = repo_dir / ".venv" / "bin" / "python"
+        if venv_python.exists():
+            return str(venv_python)
+        return "python3"
+
+    def _run_test(
+        self, test_name: str, repo_dir: Path, timeout: int = 60
+    ) -> BashResult:
+        """
+        Run a single test using the appropriate test framework for the repo.
+
+        Args:
+            test_name: Test identifier (e.g., "tests/test_foo.py::test_bar")
+            repo_dir: Path to the repository
+            timeout: Test timeout in seconds
+
+        Returns:
+            BashResult
+        """
+        python = self._get_venv_python(repo_dir)
+
+        # Get repo-specific test command
+        repo = self.task.repo if self.task else ""
+        version = self.task.version if self.task else ""
+        test_cmd = get_individual_test_command(repo, version, test_name, python)
+
+        print(f"[Test] Running: {test_cmd}")
+        result = self._exec_in_container(test_cmd, cwd=repo_dir, timeout=timeout)
+        status = "PASSED" if result.success else "FAILED"
+        print(f"[Test] {test_name}: {status}")
+        if not result.success and result.stderr:
+            print(f"[Test] Error: {result.stderr[:500]}")
+        return result
+
+    def _run_tests(
+        self, tests: list[str], repo_dir: Path, timeout_per_test: int = 60
+    ) -> dict[str, BashResult]:
+        """
+        Run multiple tests.
+
+        Args:
+            tests: List of test identifiers
+            repo_dir: Path to the repository
+            timeout_per_test: Timeout per test in seconds
+
+        Returns:
+            Dict mapping test name to BashResult
+        """
+        results = {}
+        for test in tests:
+            results[test] = self._run_test(test, repo_dir, timeout_per_test)
+        return results
 
     async def start(self, task: SWEBenchTask) -> tuple[bool, str]:
         """
@@ -180,20 +408,29 @@ class ContainerExecutor:
             return False, f"Image build failed: {error}"
 
         # Generate unique container name
-        container_name = f"swebench-{task.instance_id.replace('/', '-')}-{uuid.uuid4().hex[:8]}"
+        container_name = (
+            f"swebench-{task.instance_id.replace('/', '-')}-{uuid.uuid4().hex[:8]}"
+        )
 
         # Start container in detached mode with tail -f to keep it alive
         try:
             result = subprocess.run(
                 [
-                    "docker", "run",
+                    "docker",
+                    "run",
                     "-d",  # Detached mode
-                    "--name", container_name,
-                    "--memory", DEFAULT_CONTAINER_MEMORY,
-                    "--cpus", DEFAULT_CONTAINER_CPUS,
-                    "-w", REPO_ROOT,
+                    "--name",
+                    container_name,
+                    "--memory",
+                    DEFAULT_CONTAINER_MEMORY,
+                    "--cpus",
+                    DEFAULT_CONTAINER_CPUS,
+                    "-w",
+                    REPO_ROOT,
                     f"{self.image_name}:{self.python_version}",
-                    "tail", "-f", "/dev/null"  # Keep container alive
+                    "tail",
+                    "-f",
+                    "/dev/null",  # Keep container alive
                 ],
                 capture_output=True,
                 text=True,
@@ -210,7 +447,7 @@ class ContainerExecutor:
         clone_result = self._exec_in_container(
             f"git clone --quiet https://github.com/{task.repo}.git {REPO_ROOT}",
             cwd="/workspace",
-            timeout=300
+            timeout=300,
         )
         if not clone_result.success:
             await self.stop()
@@ -218,8 +455,7 @@ class ContainerExecutor:
 
         # Checkout base_commit for evaluation
         checkout_result = self._exec_in_container(
-            f"git checkout --quiet {task.base_commit}",
-            timeout=60
+            f"git checkout --quiet {task.base_commit}", timeout=60
         )
         if not checkout_result.success:
             await self.stop()
@@ -228,17 +464,25 @@ class ContainerExecutor:
         # Extract requirements files from environment_setup_commit without switching branches
         # Use git show to get file contents from that commit
         self._exec_in_container("mkdir -p /tmp/env_reqs", timeout=10)
-        for req_file in ["requirements.txt", "requirements-dev.txt", "test-requirements.txt",
-                         "requirements_dev.txt", "environment.yml", "environment.yaml"]:
+        for req_file in [
+            "requirements.txt",
+            "requirements-dev.txt",
+            "test-requirements.txt",
+            "requirements_dev.txt",
+            "environment.yml",
+            "environment.yaml",
+        ]:
             self._exec_in_container(
                 f"git show {task.environment_setup_commit}:{req_file} > /tmp/env_reqs/{req_file} 2>/dev/null || true",
-                timeout=10
+                timeout=10,
             )
 
         # Install external dependencies from saved requirements files
         install_result = self._install_external_dependencies()
         if not install_result.success:
-            print(f"Warning: External dependency installation failed: {install_result.stderr}")
+            print(
+                f"Warning: External dependency installation failed: {install_result.stderr}"
+            )
 
         # Install the package itself at base_commit
         pkg_install_result = self._install_package()
@@ -249,8 +493,7 @@ class ContainerExecutor:
         self._exec_in_container(f"mkdir -p {AGENT_TEMP_DIR}", timeout=10)
         # Add to .gitignore so it doesn't interfere with git operations
         self._exec_in_container(
-            f"echo '.agent_temp/' >> {REPO_ROOT}/.gitignore",
-            timeout=10
+            f"echo '.agent_temp/' >> {REPO_ROOT}/.gitignore", timeout=10
         )
 
         # Apply test_patch if present (tests needed for evaluation)
@@ -262,33 +505,60 @@ class ContainerExecutor:
                 try:
                     write_proc = subprocess.run(
                         [
-                            "docker", "exec", "-i",
+                            "docker",
+                            "exec",
+                            "-i",
                             self.container_id,
-                            "tee", f"{AGENT_TEMP_DIR}/test_patch.diff"
+                            "tee",
+                            f"{AGENT_TEMP_DIR}/test_patch.diff",
                         ],
                         input=task.test_patch,
                         capture_output=True,
                         text=True,
-                        timeout=30
+                        timeout=30,
                     )
                     if write_proc.returncode == 0:
                         # Apply the test patch
                         apply_result = self._exec_in_container(
                             f"cd {REPO_ROOT} && git apply --whitespace=fix --verbose {AGENT_TEMP_DIR}/test_patch.diff",
-                            timeout=60
+                            timeout=60,
                         )
                         if not apply_result.success:
-                            print(f"Warning: Test patch application failed: {apply_result.stderr}")
+                            print(
+                                f"Warning: Test patch application failed: {apply_result.stderr}"
+                            )
                         # Clean up
-                        self._exec_in_container(f"rm -f {AGENT_TEMP_DIR}/test_patch.diff", timeout=10)
+                        self._exec_in_container(
+                            f"rm -f {AGENT_TEMP_DIR}/test_patch.diff", timeout=10
+                        )
                 except Exception as e:
                     print(f"Warning: Failed to apply test patch: {e}")
+
+        # Run fail_to_pass and pass_to_pass tests to ensure baseline performance
+        if task.run_tests:
+            repo_dir = Path(REPO_ROOT)
+            timeout_per_test = 60
+
+            if task.fail_to_pass:
+                print(
+                    f"[ContainerExecutor] Running {len(task.fail_to_pass)} fail_to_pass tests"
+                )
+                self.fail_to_pass_results = self._run_tests(
+                    task.fail_to_pass, repo_dir, timeout_per_test
+                )
+
+            if task.pass_to_pass:
+                print(
+                    f"[ContainerExecutor] Running {len(task.pass_to_pass)} pass_to_pass tests"
+                )
+                self.pass_to_pass_results = self._run_tests(
+                    task.pass_to_pass, repo_dir, timeout_per_test
+                )
 
         # Set read/exec permissions (remove write permissions)
         # This enforces OS-level security instead of whitelist
         perm_result = self._exec_in_container(
-            f"chmod -R a-w {REPO_ROOT} && chmod -R a+rX {REPO_ROOT}",
-            timeout=60
+            f"chmod -R a-w {REPO_ROOT} && chmod -R a+rX {REPO_ROOT}", timeout=60
         )
         if not perm_result.success:
             print(f"Warning: Permission setting failed: {perm_result.stderr}")
@@ -299,15 +569,21 @@ class ContainerExecutor:
     def _install_external_dependencies(self) -> BashResult:
         """Install external dependencies from saved requirements files."""
         # Install from requirements files saved from environment_setup_commit
-        req_files = ["requirements.txt", "requirements-dev.txt", "test-requirements.txt", "requirements_dev.txt"]
+        req_files = [
+            "requirements.txt",
+            "requirements-dev.txt",
+            "test-requirements.txt",
+            "requirements_dev.txt",
+        ]
         installed = False
 
         for req_file in req_files:
-            check_result = self._exec_in_container(f"test -f /tmp/env_reqs/{req_file}", timeout=10)
+            check_result = self._exec_in_container(
+                f"test -f /tmp/env_reqs/{req_file}", timeout=10
+            )
             if check_result.success:
                 result = self._exec_in_container(
-                    f"pip install -r /tmp/env_reqs/{req_file} -q",
-                    timeout=600
+                    f"pip install -r /tmp/env_reqs/{req_file} -q", timeout=600
                 )
                 if result.success:
                     installed = True
@@ -317,10 +593,7 @@ class ContainerExecutor:
             return BashResult(cwd=self.cwd, stdout="", stderr="", success=True)
 
         return BashResult(
-            cwd=self.cwd,
-            stdout="",
-            stderr="No requirements files found",
-            success=False
+            cwd=self.cwd, stdout="", stderr="No requirements files found", success=False
         )
 
     def _install_package(self) -> BashResult:
@@ -339,17 +612,14 @@ class ContainerExecutor:
                 return result
 
         return BashResult(
-            cwd=self.cwd,
-            stdout="",
-            stderr="Could not install package",
-            success=False
+            cwd=self.cwd, stdout="", stderr="Could not install package", success=False
         )
 
     def _exec_in_container(
         self,
         command: str,
         cwd: Optional[str] = None,
-        timeout: int = DEFAULT_BASH_TIMEOUT
+        timeout: int = DEFAULT_BASH_TIMEOUT,
     ) -> BashResult:
         """
         Execute a command inside the container.
@@ -368,7 +638,7 @@ class ContainerExecutor:
                 stdout="",
                 stderr="Container not started",
                 success=False,
-                error="Container not started"
+                error="Container not started",
             )
 
         work_dir = cwd or self.cwd
@@ -376,10 +646,14 @@ class ContainerExecutor:
         try:
             result = subprocess.run(
                 [
-                    "docker", "exec",
-                    "-w", work_dir,
+                    "docker",
+                    "exec",
+                    "-w",
+                    work_dir,
                     self.container_id,
-                    "bash", "-c", command
+                    "bash",
+                    "-c",
+                    command,
                 ],
                 capture_output=True,
                 text=True,
@@ -390,7 +664,7 @@ class ContainerExecutor:
                 cwd=work_dir,
                 stdout=result.stdout[:10000] if result.stdout else "",
                 stderr=result.stderr[:2000] if result.stderr else "",
-                success=result.returncode == 0
+                success=result.returncode == 0,
             )
         except subprocess.TimeoutExpired:
             return BashResult(
@@ -398,15 +672,11 @@ class ContainerExecutor:
                 stdout="",
                 stderr=f"Command timed out after {timeout}s",
                 success=False,
-                error=f"Timeout after {timeout}s"
+                error=f"Timeout after {timeout}s",
             )
         except Exception as e:
             return BashResult(
-                cwd=work_dir,
-                stdout="",
-                stderr=str(e),
-                success=False,
-                error=str(e)
+                cwd=work_dir, stdout="", stderr=str(e), success=False, error=str(e)
             )
 
     def _resolve_path(self, target: str) -> str:
@@ -434,14 +704,14 @@ class ContainerExecutor:
                 # Make sure it's actually a path reference, not just a substring
                 # e.g., "pytest" shouldn't trigger on "/tmp" being in command
                 patterns = [
-                    f" {blocked}",      # space before (argument)
-                    f" {blocked}/",     # path with subdir
-                    f"'{blocked}",      # quoted path
-                    f'"{blocked}',      # double-quoted path
-                    f">{blocked}",      # redirect to
-                    f"<{blocked}",      # redirect from
-                    f"cat {blocked}",   # explicit cat
-                    f"ls {blocked}",    # explicit ls
+                    f" {blocked}",  # space before (argument)
+                    f" {blocked}/",  # path with subdir
+                    f"'{blocked}",  # quoted path
+                    f'"{blocked}',  # double-quoted path
+                    f">{blocked}",  # redirect to
+                    f"<{blocked}",  # redirect from
+                    f"cat {blocked}",  # explicit cat
+                    f"ls {blocked}",  # explicit ls
                 ]
                 if command.startswith(blocked) or any(p in command for p in patterns):
                     return blocked
@@ -467,7 +737,7 @@ class ContainerExecutor:
         # Exit code 0 = is ancestor, exit code 1 = is not ancestor
         result = self._exec_in_container(
             f"git merge-base --is-ancestor {base_commit} {commit_ref} && echo 'is_ahead' || echo 'not_ahead'",
-            timeout=10
+            timeout=10,
         )
 
         # If base_commit is an ancestor of commit_ref, the commit is ahead
@@ -495,7 +765,14 @@ class ContainerExecutor:
             # Skip flags and their values
             if token.startswith("-"):
                 # Some flags take values
-                if token in ["-n", "--max-count", "--author", "--since", "--until", "--grep"]:
+                if token in [
+                    "-n",
+                    "--max-count",
+                    "--author",
+                    "--since",
+                    "--until",
+                    "--grep",
+                ]:
                     skip_next = True
                 continue
             # Skip 'git' and common subcommands
@@ -535,7 +812,7 @@ class ContainerExecutor:
                 stdout="",
                 stderr="git reset is restricted.",
                 success=False,
-                error="Restricted git command"
+                error="Restricted git command",
             )
 
         if git_cmd.startswith("git pull") or git_cmd.startswith("git fetch"):
@@ -544,11 +821,17 @@ class ContainerExecutor:
                 stdout="",
                 stderr="git pull/fetch is restricted. The repo is in a fixed state.",
                 success=False,
-                error="Restricted git command"
+                error="Restricted git command",
             )
 
         # Commands that might reference commits we need to check
-        commit_referencing_cmds = ["git log", "git show", "git diff", "git checkout", "git rev-parse"]
+        commit_referencing_cmds = [
+            "git log",
+            "git show",
+            "git diff",
+            "git checkout",
+            "git rev-parse",
+        ]
 
         is_commit_cmd = any(git_cmd.startswith(cmd) for cmd in commit_referencing_cmds)
         if not is_commit_cmd:
@@ -560,9 +843,9 @@ class ContainerExecutor:
                 cwd=self.cwd,
                 stdout="",
                 stderr=f"{git_cmd} without arguments shows commits ahead of base_commit. "
-                       f"Use '{git_cmd} {self.task.base_commit}' or an earlier commit.",
+                f"Use '{git_cmd} {self.task.base_commit}' or an earlier commit.",
                 success=False,
-                error="Restricted git command"
+                error="Restricted git command",
             )
 
         # Extract commit references from the command
@@ -582,14 +865,16 @@ class ContainerExecutor:
                     cwd=self.cwd,
                     stdout="",
                     stderr=f"'{ref}' references a commit ahead of base_commit ({self.task.base_commit[:8]}). "
-                           f"Only commits at or before base_commit are accessible.",
+                    f"Only commits at or before base_commit are accessible.",
                     success=False,
-                    error="Restricted git command"
+                    error="Restricted git command",
                 )
 
         return None
 
-    async def execute_bash(self, command: str, timeout: int = DEFAULT_BASH_TIMEOUT) -> BashResult:
+    async def execute_bash(
+        self, command: str, timeout: int = DEFAULT_BASH_TIMEOUT
+    ) -> BashResult:
         """
         Execute a bash command in the container with cwd tracking.
 
@@ -609,7 +894,7 @@ class ContainerExecutor:
                 stdout="",
                 stderr="Container not started",
                 success=False,
-                error="Container not started"
+                error="Container not started",
             )
 
         command = command.strip()
@@ -627,7 +912,7 @@ class ContainerExecutor:
                     stdout="",
                     stderr=f"Access denied: {blocked} is outside the allowed workspace",
                     success=False,
-                    error="Blocked path access"
+                    error="Blocked path access",
                 )
 
             # Restrict git commands to prevent looking at commits after base_commit
@@ -665,10 +950,7 @@ class ContainerExecutor:
         # Handle special cases that we know will fail
         if target == "-":
             return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr="cd - not supported",
-                success=False
+                cwd=self.cwd, stdout="", stderr="cd - not supported", success=False
             )
 
         # 2. Execute the cd command and get the new cwd via pwd
@@ -680,7 +962,7 @@ class ContainerExecutor:
                 cwd=old_cwd,
                 stdout="",
                 stderr=f"bash: cd: {target}: No such file or directory",
-                success=False
+                success=False,
             )
 
         new_cwd = cd_result.stdout.strip()
@@ -693,17 +975,12 @@ class ContainerExecutor:
                 cwd=old_cwd,
                 stdout="",
                 stderr=f"Cannot cd outside repo root ({self.repo_root})",
-                success=False
+                success=False,
             )
 
         # 4. Valid - update cwd and return success
         self.cwd = new_cwd
-        return BashResult(
-            cwd=self.cwd,
-            stdout="",
-            stderr="",
-            success=True
-        )
+        return BashResult(cwd=self.cwd, stdout="", stderr="", success=True)
 
     async def _handle_compound_command(self, command: str, timeout: int) -> BashResult:
         """
@@ -747,7 +1024,7 @@ class ContainerExecutor:
                 cwd=self.cwd,
                 stdout="",
                 stderr="Container not started",
-                error="Container not started"
+                error="Container not started",
             )
 
         if not patch or not patch.strip():
@@ -756,19 +1033,21 @@ class ContainerExecutor:
                 cwd=self.cwd,
                 stdout="",
                 stderr="Empty patch provided",
-                error="Empty patch"
+                error="Empty patch",
             )
 
         # Check if patch tries to modify protected test files
         patch_files = self._extract_files_from_patch(patch)
-        protected_violations = [f for f in patch_files if f in self.protected_test_files]
+        protected_violations = [
+            f for f in patch_files if f in self.protected_test_files
+        ]
         if protected_violations:
             return PatchResult(
                 success=False,
                 cwd=self.cwd,
                 stdout="",
                 stderr=f"Cannot modify protected test files: {', '.join(protected_violations)}",
-                error="Protected file modification attempted"
+                error="Protected file modification attempted",
             )
 
         # Temporarily enable write permissions (excluding protected test files)
@@ -778,8 +1057,7 @@ class ContainerExecutor:
         if self.protected_test_files:
             for test_file in self.protected_test_files:
                 self._exec_in_container(
-                    f"chmod a-w {REPO_ROOT}/{test_file} 2>/dev/null || true",
-                    timeout=10
+                    f"chmod a-w {REPO_ROOT}/{test_file} 2>/dev/null || true", timeout=10
                 )
 
         # Write patch to file using docker cp via stdin (more robust than shell escaping)
@@ -787,15 +1065,11 @@ class ContainerExecutor:
         try:
             # Use docker exec with stdin to write the patch file
             write_proc = subprocess.run(
-                [
-                    "docker", "exec", "-i",
-                    self.container_id,
-                    "tee", patch_file
-                ],
+                ["docker", "exec", "-i", self.container_id, "tee", patch_file],
                 input=patch,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
             )
             if write_proc.returncode != 0:
                 self._exec_in_container(f"chmod -R a-w {REPO_ROOT}", timeout=60)
@@ -804,7 +1078,7 @@ class ContainerExecutor:
                     cwd=self.cwd,
                     stdout="",
                     stderr=f"Failed to write patch file: {write_proc.stderr}",
-                    error="Failed to write patch"
+                    error="Failed to write patch",
                 )
         except Exception as e:
             self._exec_in_container(f"chmod -R a-w {REPO_ROOT}", timeout=60)
@@ -813,47 +1087,47 @@ class ContainerExecutor:
                 cwd=self.cwd,
                 stdout="",
                 stderr=f"Failed to write patch file: {e}",
-                error="Failed to write patch"
+                error="Failed to write patch",
             )
 
         # Try to apply patch with multiple fallback strategies
         apply_result = self._exec_in_container(
             f"cd {REPO_ROOT} && git apply --whitespace=fix --verbose {patch_file}",
-            timeout=60
+            timeout=60,
         )
 
         if not apply_result.success:
             # Try with --3way for merge conflicts
             apply_result = self._exec_in_container(
                 f"cd {REPO_ROOT} && git apply --whitespace=fix --3way {patch_file}",
-                timeout=60
+                timeout=60,
             )
 
         if not apply_result.success:
             # Fallback to patch command which is more lenient
             apply_result = self._exec_in_container(
                 f"cd {REPO_ROOT} && patch -p1 --ignore-whitespace < {patch_file}",
-                timeout=60
+                timeout=60,
             )
 
         # Clean up patch file
         self._exec_in_container(f"rm -f {patch_file}", timeout=10)
 
         # Restore read-only permissions
-        self._exec_in_container(f"chmod -R a-w {REPO_ROOT} && chmod -R a+rX {REPO_ROOT}", timeout=60)
+        self._exec_in_container(
+            f"chmod -R a-w {REPO_ROOT} && chmod -R a+rX {REPO_ROOT}", timeout=60
+        )
 
         return PatchResult(
             success=apply_result.success,
             cwd=self.cwd,
             stdout=apply_result.stdout,
             stderr=apply_result.stderr,
-            error=None if apply_result.success else "Patch application failed"
+            error=None if apply_result.success else "Patch application failed",
         )
 
     async def execute_debug(
-        self,
-        command: str,
-        timeout: int = DEFAULT_BASH_TIMEOUT
+        self, command: str, timeout: int = DEFAULT_BASH_TIMEOUT
     ) -> BashResult:
         """
         Execute a debug session in an isolated container.
@@ -877,7 +1151,7 @@ class ContainerExecutor:
                 stdout="",
                 stderr="Container not started",
                 success=False,
-                error="Container not started"
+                error="Container not started",
             )
 
         temp_image = None
@@ -890,7 +1164,7 @@ class ContainerExecutor:
                 ["docker", "commit", self.container_id, temp_image],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=60,
             )
             if commit_result.returncode != 0:
                 return BashResult(
@@ -898,21 +1172,27 @@ class ContainerExecutor:
                     stdout="",
                     stderr=f"Failed to create debug snapshot: {commit_result.stderr}",
                     success=False,
-                    error="Debug snapshot failed"
+                    error="Debug snapshot failed",
                 )
 
             # Step 2: Start a temporary container from the snapshot
             run_result = subprocess.run(
                 [
-                    "docker", "run", "-d",
-                    "--memory", DEFAULT_CONTAINER_MEMORY,
-                    "--cpus", DEFAULT_CONTAINER_CPUS,
+                    "docker",
+                    "run",
+                    "-d",
+                    "--memory",
+                    DEFAULT_CONTAINER_MEMORY,
+                    "--cpus",
+                    DEFAULT_CONTAINER_CPUS,
                     temp_image,
-                    "tail", "-f", "/dev/null"  # Keep container running
+                    "tail",
+                    "-f",
+                    "/dev/null",  # Keep container running
                 ],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
             )
             if run_result.returncode != 0:
                 return BashResult(
@@ -920,7 +1200,7 @@ class ContainerExecutor:
                     stdout="",
                     stderr=f"Failed to start debug container: {run_result.stderr}",
                     success=False,
-                    error="Debug container failed"
+                    error="Debug container failed",
                 )
             temp_container = run_result.stdout.strip()
 
@@ -928,30 +1208,46 @@ class ContainerExecutor:
             subprocess.run(
                 ["docker", "exec", temp_container, "chmod", "-R", "u+w", REPO_ROOT],
                 capture_output=True,
-                timeout=60
+                timeout=60,
             )
 
             # Re-protect test files
             for test_file in self.protected_test_files:
                 subprocess.run(
-                    ["docker", "exec", temp_container, "chmod", "a-w", f"{REPO_ROOT}/{test_file}"],
+                    [
+                        "docker",
+                        "exec",
+                        temp_container,
+                        "chmod",
+                        "a-w",
+                        f"{REPO_ROOT}/{test_file}",
+                    ],
                     capture_output=True,
-                    timeout=10
+                    timeout=10,
                 )
 
             # Step 4: Execute the command (with write access to source files)
             exec_result = subprocess.run(
-                ["docker", "exec", "-w", self.cwd, temp_container, "bash", "-c", command],
+                [
+                    "docker",
+                    "exec",
+                    "-w",
+                    self.cwd,
+                    temp_container,
+                    "bash",
+                    "-c",
+                    command,
+                ],
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
             )
 
             return BashResult(
                 cwd=self.cwd,
                 stdout=exec_result.stdout,
                 stderr=exec_result.stderr,
-                success=exec_result.returncode == 0
+                success=exec_result.returncode == 0,
             )
 
         except subprocess.TimeoutExpired:
@@ -960,15 +1256,11 @@ class ContainerExecutor:
                 stdout="",
                 stderr=f"Debug command timed out after {timeout}s",
                 success=False,
-                error="Timeout"
+                error="Timeout",
             )
         except Exception as e:
             return BashResult(
-                cwd=self.cwd,
-                stdout="",
-                stderr=str(e),
-                success=False,
-                error=str(e)
+                cwd=self.cwd, stdout="", stderr=str(e), success=False, error=str(e)
             )
         finally:
             # Step 5: Cleanup - destroy temp container and image
@@ -976,13 +1268,11 @@ class ContainerExecutor:
                 subprocess.run(
                     ["docker", "rm", "-f", temp_container],
                     capture_output=True,
-                    timeout=30
+                    timeout=30,
                 )
             if temp_image:
                 subprocess.run(
-                    ["docker", "rmi", "-f", temp_image],
-                    capture_output=True,
-                    timeout=30
+                    ["docker", "rmi", "-f", temp_image], capture_output=True, timeout=30
                 )
 
     async def stop(self):
@@ -992,12 +1282,12 @@ class ContainerExecutor:
                 subprocess.run(
                     ["docker", "stop", self.container_id],
                     capture_output=True,
-                    timeout=30
+                    timeout=30,
                 )
                 subprocess.run(
                     ["docker", "rm", "-f", self.container_id],
                     capture_output=True,
-                    timeout=30
+                    timeout=30,
                 )
             except Exception as e:
                 print(f"Warning: Failed to stop container: {e}")
