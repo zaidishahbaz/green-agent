@@ -17,10 +17,7 @@ AgentSWE cleanly separates responsibilities between agents and constrains intera
 
 ## Architecture Overview
 
-<!-- TODO: Insert high-level AgentSWE architecture diagram -->
-<!-- Example: docs/images/agent_swe_architecture.png -->
-
-![AgentSWE Architecture](docs/images/agent_swe_architecture.png)
+![AgentSWE Architecture](docs/images/agentswe_architecture.png)
 
 *Figure 1: High-level architecture showing Green and Purple agents communicating via A2A artifacts.*
 
@@ -31,7 +28,7 @@ AgentSWE cleanly separates responsibilities between agents and constrains intera
 AgentSWE is built around three core principles:
 
 - **Clean Separation of Concerns**
-- **Three Interactive Execution Modes**
+- **3 Interactive Execution Modes**
 - **No Extra / Custom Tools Required**
 
 We additionally introduce **token efficiency** as a first-class evaluation signal alongside resolution accuracy.
@@ -41,12 +38,10 @@ We additionally introduce **token efficiency** as a first-class evaluation signa
 ## Agent Roles & Responsibilities
 
 
-![Green–Purple Agent Interaction](docs/images/agentswe_architecture.png)
-
-*Figure 2: Separation of responsibilities between Green (orchestrator) and Purple (reasoning) agents.*
+There is a clear Separation of responsibilities between Green (benchmark) and Purple (solver) agents.
 
 ### Green Agent
-- Acts as the **orchestrator**
+- Acts as the **benchmark** and **orchestrator**
 - Sends **issue details and repository metadata** to the Purple Agent via A2A
 - Executes commands on behalf of the Purple Agent
 - Communicates exclusively via **A2A artifacts**
@@ -61,7 +56,7 @@ We additionally introduce **token efficiency** as a first-class evaluation signa
 - Communicates results back via **A2A artifacts**
 
 This separation ensures:
-- Deterministic execution
+- Deterministic artifacts sent to both green and purple agent
 - Clear responsibility boundaries
 - Reproducible evaluation behavior
 
@@ -99,9 +94,6 @@ This design enforces a clean progression:
 
 ## No Extra Tools Needed
 
-<!-- TODO: Optional comparison diagram with traditional SWE-bench harnesses -->
-<!-- Example: docs/images/no_extra_tools_comparison.png -->
-
 Existing SWE-bench harnesses often rely on **custom tools** (search APIs, repo-specific helpers, etc.), which tightly couple benchmark performance to a model’s ability to use those tools.
 
 AgentSWE removes this dependency.
@@ -119,14 +111,11 @@ As a result:
 
 ## Evaluation Metrics
 
-<!-- TODO: Insert metrics overview diagram -->
-<!-- Example: docs/images/metrics_overview.png -->
-
-![Evaluation Metrics](docs/images/metrics_overview.png)
-
-*Figure 4: Effectiveness vs efficiency metrics tracked in AgentSWE.*
-
 AgentSWE tracks both **effectiveness** and **efficiency**.
+
+Key Idea: A **preferred** agent is the purple agent that has a high Resolved Rate and requests fewer number of tokens.
+
+Hence, following are the Key Metrics we track:
 
 ### Existing Metrics (from SWE-bench-Verified)
 - **Resolved Rate**
@@ -140,11 +129,10 @@ AgentSWE tracks both **effectiveness** and **efficiency**.
     - Bash mode
     - Debug mode
 
-A *preferred* agent is one that:
-- Resolves more issues
-- Uses fewer tokens to do so
 
 This captures the trade-off between **reasoning quality** and **computational efficiency**.
+
+We also capture total number of FAIL_TO_PASS, PASS_TO_PASS, average number of turns.
 
 ---
 
