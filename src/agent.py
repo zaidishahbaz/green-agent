@@ -35,16 +35,18 @@ def parse_solver_response(response: dict) -> tuple[str | None, str | None]:
     """
     Parse the solver response to extract action and content.
 
-    The solver should respond with JSON: {"action": "bash"|"patch", "content": "..."}
+    The solver should respond with JSON: {"action": "bash"|"patch"|"debug", "content": "..."}
 
     Returns:
         tuple[action, content]: The action type and content, or (None, None) if parsing fails
     """
+    VALID_ACTIONS = ("bash", "patch", "debug")
+
     content = response.get("content", "")
 
     # First, try to parse from the artifact action field
     action = response.get("action", "")
-    if action in ("bash", "patch"):
+    if action in VALID_ACTIONS:
         return action, content
 
     # Try to parse content as JSON
@@ -56,19 +58,19 @@ def parse_solver_response(response: dict) -> tuple[str | None, str | None]:
             if isinstance(parsed, dict):
                 action = parsed.get("action", "")
                 content = parsed.get("content", "")
-                if action in ("bash", "patch"):
+                if action in VALID_ACTIONS:
                     return action, content
         except json.JSONDecodeError:
             pass
 
         # Try to find JSON in the content (LLM might add extra text)
-        json_match = re.search(r'\{[^{}]*"action"\s*:\s*"(bash|patch)"[^{}]*\}', content, re.DOTALL)
+        json_match = re.search(r'\{[^{}]*"action"\s*:\s*"(bash|patch|debug)"[^{}]*\}', content, re.DOTALL)
         if json_match:
             try:
                 parsed = json.loads(json_match.group(0))
                 action = parsed.get("action", "")
                 content = parsed.get("content", "")
-                if action in ("bash", "patch"):
+                if action in VALID_ACTIONS:
                     return action, content
             except json.JSONDecodeError:
                 pass
