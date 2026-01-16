@@ -20,7 +20,7 @@
 
 ---
 
-## SWEAgent at a Glance
+## AgentSWE at a Glance
 
 ![Architecture diagram](docs/images/agentswe_architecture.png)
 
