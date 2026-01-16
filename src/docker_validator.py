@@ -83,6 +83,28 @@ def get_python_version(repo: str, version: str) -> str:
     return "3.9"
 
 
+def get_debian_version(python_version: str) -> str:
+    """
+    Get the appropriate Debian version for a Python version.
+    Older Python versions require older Debian releases.
+
+    - Python 3.5, 3.6, 3.7 → buster (Debian 10)
+    - Python 3.8, 3.9 → bullseye (Debian 11)
+    - Python 3.10, 3.11+ → bookworm (Debian 12)
+    """
+    try:
+        ver = float(python_version)
+    except (ValueError, TypeError):
+        ver = 3.9
+
+    if ver <= 3.7:
+        return "buster"
+    elif ver <= 3.9:
+        return "bullseye"
+    else:
+        return "bookworm"
+
+
 # Legacy mapping for backward compatibility (uses Python 3.9 for all)
 REPO_PYTHON_VERSIONS = {
     "astropy/astropy": "3.9",
@@ -159,6 +181,9 @@ class DockerValidator:
         if not dockerfile_path.exists():
             return False, f"Dockerfile not found: {dockerfile_path}"
 
+        # Get the appropriate Debian version for this Python version
+        debian_version = get_debian_version(python_version)
+
         cmd = [
             "docker",
             "build",
@@ -166,6 +191,8 @@ class DockerValidator:
             str(dockerfile_path),
             "--build-arg",
             f"PYTHON_VERSION={python_version}",
+            "--build-arg",
+            f"DEBIAN_VERSION={debian_version}",
             "-t",
             f"{self.image_name}:{python_version}",
             str(dockerfile_path.parent.parent),

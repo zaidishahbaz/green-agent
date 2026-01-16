@@ -8,8 +8,9 @@
 #     -t swebench-django .
 
 ARG PYTHON_VERSION=3.11
+ARG DEBIAN_VERSION=bookworm
 
-FROM python:${PYTHON_VERSION}-slim-bookworm
+FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION}
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
