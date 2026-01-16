@@ -275,6 +275,7 @@ class DockerValidator:
         task_input = {
             "instance_id": instance_id,
             "repo": repo,
+            "version": version or "",
             "base_commit": base_commit,
             "environment_setup_commit": environment_setup_commit or base_commit,
             "patch": patch,
