@@ -18,7 +18,7 @@
 | **No Custom Tools** | Standard bash/git only - measures bug-fixing, not tool mastery |
 | **Token Efficiency** | First-class metric alongside resolution accuracy |
 
-**[Watch the Demo Video](https://www.youtube.com/watch?v=Qvrz_tH8QZE)**
+**[Watch the Demo Video](https://www.youtube.com/watch?v=Qvrz_tH8QZE)**  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;   **[Skim through Slides](https://docs.google.com/presentation/d/1XdEmPY2ZZAqFVRzDsIgPypSVWYbNudDK_A1oMTw2Was)**
 
 ---
 
