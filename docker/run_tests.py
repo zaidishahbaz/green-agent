@@ -28,16 +28,18 @@ from pathlib import Path
 def run_command(cmd, cwd=None, timeout=300):
     """Run a command and return (return_code, stdout, stderr)."""
     try:
+        # Use stdout/stderr PIPE instead of capture_output for Python 3.6 compatibility
         result = subprocess.run(
             cmd,
             cwd=cwd,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,  # text=True equivalent for Python 3.6
             timeout=timeout,
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
-        return -1, "", f"Command timed out after {timeout}s"
+        return -1, "", "Command timed out after {}s".format(timeout)
     except Exception as e:
         return -1, "", str(e)
 
@@ -241,17 +243,19 @@ def run_test(test_name, repo_dir, repo="", version="", timeout=120):
         env["PYTHONWARNINGS"] = "ignore::UserWarning,ignore::SyntaxWarning"
 
     try:
+        # Use stdout/stderr PIPE instead of capture_output for Python 3.6 compatibility
         result = subprocess.run(
             cmd,
             cwd=repo_dir,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,  # text=True equivalent for Python 3.6
             timeout=timeout,
             env=env,
         )
         code, stdout, stderr = result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
-        code, stdout, stderr = -1, "", f"Command timed out after {timeout}s"
+        code, stdout, stderr = -1, "", "Command timed out after {}s".format(timeout)
     except Exception as e:
         code, stdout, stderr = -1, "", str(e)
 
