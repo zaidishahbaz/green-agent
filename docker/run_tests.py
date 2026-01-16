@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 """
+=============================================================================
+DEPRECATED - This script is no longer used.
+Validation now runs via `docker exec` in the existing container managed by
+ContainerExecutor. Tests are run directly using docker_validator.py which
+executes test commands via `docker exec`.
+Keeping for reference only.
+=============================================================================
+
 SWE-bench Test Runner for Docker containers.
 
 This script runs inside a Docker container and:

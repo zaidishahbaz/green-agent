@@ -122,7 +122,6 @@ class Agent:
     def __init__(self):
         self.messenger = Messenger()
         self.dataset = SWEBenchDataset()
-        self.docker_validator = DockerValidator()
         self.container: ContainerExecutor | None = None
 
     def validate_request(self, request: EvalRequest) -> tuple[bool, str]:
@@ -189,15 +188,32 @@ class Agent:
         return None
 
     async def validate_patch(
-        self, task: SWEBenchTask, patch: str, updater: TaskUpdater
+        self, task: SWEBenchTask, updater: TaskUpdater
     ) -> dict[str, Any]:
-        """Validate a patch using Docker container."""
+        """Validate a patch by running tests in the existing container.
+
+        The patch should already be applied in self.container.
+        This just runs the tests - no cloning, installing, or re-patching.
+        """
+        if not self.container or not self.container.container_id:
+            return {
+                "patch_applied": False,
+                "install_success": False,
+                "tests_passed": 0,
+                "tests_failed": 0,
+                "score": 0.0,
+                "errors": ["No container available for validation"],
+                "test_details": {},
+            }
+
         await updater.update_status(
             TaskState.working,
             new_agent_text_message(f"Validating patch for {task.instance_id}..."),
         )
 
-        result = self.docker_validator.validate_task(task, patch)
+        # Create validator with the existing container
+        validator = DockerValidator(container_id=self.container.container_id)
+        result = validator.validate_task(task)
 
         return {
             "patch_applied": result.patch_applied,
@@ -356,7 +372,17 @@ class Agent:
                             TaskState.working,
                             new_agent_text_message(f"[Turn {turn}] Patch applied successfully"),
                         )
-                        break
+
+                        # Run validation NOW while container is still alive
+                        validation = await self.validate_patch(task, updater)
+
+                        return {
+                            "patch": patch,
+                            "turns": turn,
+                            "conversation_history": conversation_history,
+                            "validation": validation,
+                            "error": None
+                        }
                     else:
                         # Patch failed - check if we can retry
                         if patch_attempts >= max_patch_retries:
@@ -501,19 +527,12 @@ class Agent:
                         }
 
             # If we exhausted turns without getting a patch
-            if patch is None:
-                return {
-                    "patch": None,
-                    "turns": turn,
-                    "conversation_history": conversation_history,
-                    "error": f"Max turns ({max_turns}) reached without successful patch"
-                }
-
+            # (patch is always None here since successful patches return early with validation)
             return {
-                "patch": patch,
+                "patch": None,
                 "turns": turn,
                 "conversation_history": conversation_history,
-                "error": None
+                "error": f"Max turns ({max_turns}) reached without successful patch"
             }
 
         finally:
@@ -617,11 +636,11 @@ class Agent:
                 result_entry["conversation_history"] = conversation_result["conversation_history"]
 
                 patch = conversation_result["patch"]
+                validation = conversation_result.get("validation")
                 print(f"[{task.instance_id}] Extracted patch after {conversation_result['turns']} turns")
 
-                if patch:
-                    # Validate the patch using Docker
-                    validation = await self.validate_patch(task, patch, updater)
+                if patch and validation:
+                    # Validation was done inside run_multi_turn_conversation
                     result_entry["patch"] = patch
                     result_entry["validation"] = validation
                     result_entry["status"] = "validated"

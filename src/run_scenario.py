@@ -8,7 +8,7 @@ and optionally triggers an evaluation.
 Usage:
     uv run swebench-run scenarios/swebench/scenario.toml
     uv run swebench-run scenarios/swebench/scenario.toml --serve-only
-    uv run swebench-run --docker-test  # Quick Docker validation test
+    # LOCAL TESTING: uv run swebench-run --docker-test  (uncomment in code to enable)
 """
 
 import argparse
@@ -122,45 +122,79 @@ async def run_evaluation(green_url: str, config: dict) -> dict:
         return events
 
 
-def run_docker_test():
-    """Run a quick Docker validation test."""
-    print("Running Docker validation test...")
-    print("=" * 50)
-
-    # Import here to avoid loading heavy deps for --help
-    sys.path.insert(0, str(Path(__file__).parent))
-    from docker_validator import DockerValidator
-    from swebench import SWEBenchDataset
-
-    print("Loading SWE-bench dataset...")
-    dataset = SWEBenchDataset()
-    dataset.load()
-
-    task = dataset.get_task_by_id("django__django-11099")
-    if not task:
-        print("Error: Task not found")
-        return 1
-
-    print(f"\nTask: {task.instance_id}")
-    print(f"Repo: {task.repo}")
-    print(f"Tests: {len(task.fail_to_pass)}")
-
-    print("\nRunning Docker validation with gold patch...")
-    validator = DockerValidator()
-    result = validator.validate_task(task, task.patch)
-
-    print(f"\n{'=' * 50}")
-    print(f"RESULTS")
-    print(f"{'=' * 50}")
-    print(f"Patch applied:   {result.patch_applied}")
-    print(f"Install success: {result.install_success}")
-    print(f"Tests passed:    {result.tests_passed}/{result.tests_passed + result.tests_failed}")
-    print(f"Score:           {result.score:.0%}")
-
-    if result.errors:
-        print(f"\nErrors: {result.errors}")
-
-    return 0 if result.score == 1.0 else 1
+# =============================================================================
+# LOCAL TESTING ONLY - Uncomment to use --docker-test for local validation
+# =============================================================================
+# def run_docker_test():
+#     """Run a quick Docker validation test.
+#
+#     Note: This test now requires using ContainerExecutor to set up the environment
+#     and apply the patch before running validation.
+#     """
+#     import asyncio
+#
+#     print("Running Docker validation test...")
+#     print("=" * 50)
+#
+#     # Import here to avoid loading heavy deps for --help
+#     sys.path.insert(0, str(Path(__file__).parent))
+#     from docker_validator import DockerValidator
+#     from swebench import SWEBenchDataset
+#     from container_executor import ContainerExecutor
+#
+#     print("Loading SWE-bench dataset...")
+#     dataset = SWEBenchDataset()
+#     dataset.load()
+#
+#     task = dataset.get_task_by_id("sympy__sympy-20916")
+#     if not task:
+#         print("Error: Task not found")
+#         return 1
+#
+#     print(f"\nTask: {task.instance_id}")
+#     print(f"Repo: {task.repo}")
+#     print(f"Tests: {len(task.fail_to_pass)}")
+#
+#     async def run_test():
+#         # Set up container
+#         print("\nStarting container...")
+#         container = ContainerExecutor()
+#         success, error = await container.start(task)
+#         if not success:
+#             print(f"Error starting container: {error}")
+#             return 1
+#
+#         try:
+#             # Apply gold patch
+#             print("\nApplying gold patch...")
+#             patch_result = await container.apply_patch(task.patch)
+#             if not patch_result.success:
+#                 print(f"Error applying patch: {patch_result.stderr}")
+#                 return 1
+#
+#             # Run validation
+#             print("\nRunning validation...")
+#             validator = DockerValidator(container_id=container.container_id)
+#             result = validator.validate_task(task)
+#
+#             print(f"\n{'=' * 50}")
+#             print(f"RESULTS")
+#             print(f"{'=' * 50}")
+#             print(f"Patch applied:   {result.patch_applied}")
+#             print(f"Install success: {result.install_success}")
+#             print(f"Tests passed:    {result.tests_passed}/{result.tests_passed + result.tests_failed}")
+#             print(f"Score:           {result.score:.0%}")
+#
+#             if result.errors:
+#                 print(f"\nErrors: {result.errors}")
+#
+#             return 0 if result.score == 1.0 else 1
+#
+#         finally:
+#             await container.stop()
+#
+#     return asyncio.run(run_test())
+# =============================================================================
 
 
 def main():
@@ -168,14 +202,15 @@ def main():
     parser.add_argument("scenario", nargs="?", help="Path to scenario.toml")
     parser.add_argument("--serve-only", action="store_true", help="Only start agents, don't run evaluation")
     parser.add_argument("--show-logs", action="store_true", help="Show agent logs")
-    parser.add_argument("--docker-test", action="store_true", help="Run Docker validation test")
+    # LOCAL TESTING ONLY - Uncomment to enable --docker-test
+    # parser.add_argument("--docker-test", action="store_true", help="Run Docker validation test")
     parser.add_argument("--timeout", type=float, default=30.0, help="Agent startup timeout")
 
     args = parser.parse_args()
 
-    # Quick Docker test mode
-    if args.docker_test:
-        sys.exit(run_docker_test())
+    # LOCAL TESTING ONLY - Uncomment to enable --docker-test
+    # if args.docker_test:
+    #     sys.exit(run_docker_test())
 
     if not args.scenario:
         parser.print_help()
