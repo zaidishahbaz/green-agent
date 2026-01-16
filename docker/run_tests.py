@@ -282,7 +282,7 @@ def main():
     try:
         task = json.load(sys.stdin)
     except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"Invalid JSON input: {e}"}))
+        print(json.dumps({"error": "Invalid JSON input: {}".format(e)}), file=sys.stderr)
         sys.exit(1)
 
     # Extract task fields
@@ -298,6 +298,10 @@ def main():
     # Support legacy "tests" field for backward compatibility
     tests = task.get("tests", []) or (fail_to_pass + pass_to_pass)
     timeout_per_test = task.get("timeout_per_test", 120)
+
+    # Debug: log received task info
+    print("[run_tests.py] Received task: repo={}, version={}, fail_to_pass={}, pass_to_pass={}".format(
+        repo, version, len(fail_to_pass), len(pass_to_pass)), file=sys.stderr)
 
     if not repo or not base_commit:
         print(json.dumps({"error": "Missing required fields: repo, base_commit"}))
@@ -358,18 +362,25 @@ def main():
             # Continue anyway, tests might still work
 
     # Step 6: Run tests
+    print("[run_tests.py] Running {} fail_to_pass and {} pass_to_pass tests".format(
+        len(fail_to_pass), len(pass_to_pass)), file=sys.stderr)
+
     fail_to_pass_results = {}
     pass_to_pass_results = {}
 
     for test in fail_to_pass:
+        print("[run_tests.py] Running fail_to_pass test: {}".format(test), file=sys.stderr)
         test_result = run_test(test, workspace, repo=repo, version=version, timeout=timeout_per_test)
         fail_to_pass_results[test] = test_result
         result["test_results"][test] = test_result
+        print("[run_tests.py] Result: {}".format("PASSED" if test_result["passed"] else "FAILED"), file=sys.stderr)
 
     for test in pass_to_pass:
+        print("[run_tests.py] Running pass_to_pass test: {}".format(test), file=sys.stderr)
         test_result = run_test(test, workspace, repo=repo, version=version, timeout=timeout_per_test)
         pass_to_pass_results[test] = test_result
         result["test_results"][test] = test_result
+        print("[run_tests.py] Result: {}".format("PASSED" if test_result["passed"] else "FAILED"), file=sys.stderr)
 
     result["fail_to_pass_results"] = fail_to_pass_results
     result["pass_to_pass_results"] = pass_to_pass_results
