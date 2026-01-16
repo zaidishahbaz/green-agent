@@ -18,6 +18,8 @@
 | **No Custom Tools** | Standard bash/git only - measures bug-fixing, not tool mastery |
 | **Token Efficiency** | First-class metric alongside resolution accuracy |
 
+**[Watch the Demo Video](https://www.youtube.com/watch?v=Qvrz_tH8QZE)**
+
 ---
 
 ## AgentSWE at a Glance
