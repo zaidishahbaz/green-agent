@@ -12,6 +12,14 @@ ARG DEBIAN_VERSION=bookworm
 
 FROM python:${PYTHON_VERSION}-slim-${DEBIAN_VERSION}
 
+# Fix apt sources for archived Debian versions (buster)
+# Buster has been moved to archive.debian.org
+RUN if grep -q "buster" /etc/os-release 2>/dev/null; then \
+        echo "deb http://archive.debian.org/debian buster main" > /etc/apt/sources.list && \
+        echo "deb http://archive.debian.org/debian-security buster/updates main" >> /etc/apt/sources.list && \
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until; \
+    fi
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
