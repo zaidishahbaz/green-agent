@@ -277,6 +277,7 @@ class Agent:
         turn = 0
         patch_attempts = 0
         start_time = time.time()
+        bash_stdout_chars = 0  # Track total stdout characters sent to solver
 
         # Start container for this task
         self.container = ContainerExecutor()
@@ -293,6 +294,7 @@ class Agent:
                 "patch": None,
                 "turns": 0,
                 "conversation_history": [],
+                "bash_stdout_chars": 0,
                 "error": f"Failed to start container: {error}"
             }
         
@@ -317,6 +319,7 @@ class Agent:
                     "patch": None,
                     "turns": turn,
                     "conversation_history": conversation_history,
+                    "bash_stdout_chars": bash_stdout_chars,
                     "error": f"Failed to send initial message: {e}"
                 }
 
@@ -334,6 +337,7 @@ class Agent:
                         "patch": None,
                         "turns": turn,
                         "conversation_history": conversation_history,
+                        "bash_stdout_chars": bash_stdout_chars,
                         "error": f"Task timed out after {task_timeout} seconds"
                     }
 
@@ -380,6 +384,7 @@ class Agent:
                             "patch": patch,
                             "turns": turn,
                             "conversation_history": conversation_history,
+                            "bash_stdout_chars": bash_stdout_chars,
                             "validation": validation,
                             "error": None
                         }
@@ -391,6 +396,7 @@ class Agent:
                                 "patch": None,
                                 "turns": turn,
                                 "conversation_history": conversation_history,
+                                "bash_stdout_chars": bash_stdout_chars,
                                 "error": f"Patch failed after {patch_attempts} attempts: {patch_result.stderr}"
                             }
 
@@ -412,6 +418,7 @@ class Agent:
                                 "patch": None,
                                 "turns": turn,
                                 "conversation_history": conversation_history,
+                                "bash_stdout_chars": bash_stdout_chars,
                                 "error": f"Failed to send patch failure feedback: {e}"
                             }
 
@@ -426,6 +433,9 @@ class Agent:
 
                     # Format structured response
                     bash_output = self._format_bash_result(bash_result)
+
+                    # Track stdout characters sent to solver
+                    bash_stdout_chars += len(bash_result.stdout) if bash_result.stdout else 0
 
                     conversation_history.append({
                         "turn": turn,
@@ -445,6 +455,7 @@ class Agent:
                             "patch": None,
                             "turns": turn,
                             "conversation_history": conversation_history,
+                            "bash_stdout_chars": bash_stdout_chars,
                             "error": f"Failed to send bash result: {e}"
                         }
 
@@ -462,6 +473,9 @@ class Agent:
                         command=debug_command,
                         timeout=bash_timeout
                     )
+
+                    # Track stdout characters sent to solver (same counter for bash and debug)
+                    bash_stdout_chars += len(debug_result.stdout) if debug_result.stdout else 0
 
                     # Format response
                     debug_output = {
@@ -491,6 +505,7 @@ class Agent:
                             "patch": None,
                             "turns": turn,
                             "conversation_history": conversation_history,
+                            "bash_stdout_chars": bash_stdout_chars,
                             "error": f"Failed to send debug result: {e}"
                         }
 
@@ -523,6 +538,7 @@ class Agent:
                             "patch": None,
                             "turns": turn,
                             "conversation_history": conversation_history,
+                            "bash_stdout_chars": bash_stdout_chars,
                             "error": f"Failed to send error feedback: {e}"
                         }
 
@@ -532,6 +548,7 @@ class Agent:
                 "patch": None,
                 "turns": turn,
                 "conversation_history": conversation_history,
+                "bash_stdout_chars": bash_stdout_chars,
                 "error": f"Max turns ({max_turns}) reached without successful patch"
             }
 
@@ -555,7 +572,8 @@ class Agent:
                 "max_turns": 10,  # optional: max conversation turns per task (default: 10)
                 "bash_timeout": 30,  # optional: timeout per bash command (default: 30s)
                 "task_timeout": 600,  # optional: overall timeout per task (default: 600s)
-                "max_patch_retries": 3  # optional: max patch retry attempts (default: 3)
+                "max_patch_retries": 3,  # optional: max patch retry attempts (default: 3)
+                "max_attempts": 1  # optional: max attempts per task for pass@k (default: 1 for pass@1, use 3 for pass@3)
             }
         }
         """
@@ -578,6 +596,7 @@ class Agent:
         bash_timeout = request.config.get("bash_timeout", DEFAULT_BASH_TIMEOUT)
         task_timeout = request.config.get("task_timeout", DEFAULT_TASK_TIMEOUT)
         max_patch_retries = request.config.get("max_patch_retries", DEFAULT_MAX_PATCH_RETRIES)
+        max_attempts = request.config.get("max_attempts", 1)  # pass@k: 1 for pass@1, 3 for pass@3
 
         # Load dataset
         await updater.update_status(
@@ -607,65 +626,90 @@ class Agent:
         results = []
 
         for i, task in enumerate(tasks):
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(
-                    f"[{i+1}/{len(tasks)}] Starting evaluation for {task.instance_id}..."
-                ),
-            )
+            best_result = None
+            best_score = -1.0
 
-            result_entry = {
-                "instance_id": task.instance_id,
-                "repo": task.repo,
-                "fail_to_pass": task.fail_to_pass,
-            }
-
-            try:
-                # Run multi-turn conversation with solver
-                conversation_result = await self.run_multi_turn_conversation(
-                    task=task,
-                    solver_url=solver_url,
-                    updater=updater,
-                    max_turns=max_turns,
-                    bash_timeout=bash_timeout,
-                    task_timeout=task_timeout,
-                    max_patch_retries=max_patch_retries,
+            # Run up to max_attempts for pass@k evaluation
+            for attempt in range(1, max_attempts + 1):
+                attempt_str = f" (attempt {attempt}/{max_attempts})" if max_attempts > 1 else ""
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message(
+                        f"[{i+1}/{len(tasks)}] Starting evaluation for {task.instance_id}{attempt_str}..."
+                    ),
                 )
 
-                result_entry["turns"] = conversation_result["turns"]
-                result_entry["conversation_history"] = conversation_result["conversation_history"]
+                result_entry = {
+                    "instance_id": task.instance_id,
+                    "repo": task.repo,
+                    "fail_to_pass": task.fail_to_pass,
+                    "attempt": attempt,
+                }
 
-                patch = conversation_result["patch"]
-                validation = conversation_result.get("validation")
-                print(f"[{task.instance_id}] Extracted patch after {conversation_result['turns']} turns")
+                try:
+                    # Run multi-turn conversation with solver
+                    conversation_result = await self.run_multi_turn_conversation(
+                        task=task,
+                        solver_url=solver_url,
+                        updater=updater,
+                        max_turns=max_turns,
+                        bash_timeout=bash_timeout,
+                        task_timeout=task_timeout,
+                        max_patch_retries=max_patch_retries,
+                    )
 
-                if patch and validation:
-                    # Validation was done inside run_multi_turn_conversation
-                    result_entry["patch"] = patch
-                    result_entry["validation"] = validation
-                    result_entry["status"] = "validated"
-                    result_entry["score"] = validation.get("score", 0.0)
+                    result_entry["turns"] = conversation_result["turns"]
+                    result_entry["conversation_history"] = conversation_result["conversation_history"]
+                    result_entry["bash_stdout_chars"] = conversation_result.get("bash_stdout_chars", 0)
 
-                    # Log validation results
-                    print(f"🧪 VALIDATION RESULTS for {task.instance_id}")
-                    print(f"{'='*60}")
-                    print(f"Score: {validation.get('score', 0.0):.2%}")
-                    print(f"Tests passed: {validation.get('tests_passed', 0)}")
-                    print(f"Tests failed: {validation.get('tests_failed', 0)}")
-                    if validation.get('score', 0.0) == 1.0:
-                        print(f"🎉 ALL TESTS PASSED!")
-                    print(f"{'='*60}\n")
-                else:
-                    result_entry["status"] = "no_patch"
+                    patch = conversation_result["patch"]
+                    validation = conversation_result.get("validation")
+                    print(f"[{task.instance_id}] Extracted patch after {conversation_result['turns']} turns")
+
+                    if patch and validation:
+                        # Validation was done inside run_multi_turn_conversation
+                        result_entry["patch"] = patch
+                        result_entry["validation"] = validation
+                        result_entry["status"] = "validated"
+                        result_entry["score"] = validation.get("score", 0.0)
+
+                        # Log validation results
+                        print(f"🧪 VALIDATION RESULTS for {task.instance_id}{attempt_str}")
+                        print(f"{'='*60}")
+                        print(f"Score: {validation.get('score', 0.0):.2%}")
+                        print(f"Tests passed: {validation.get('tests_passed', 0)}")
+                        print(f"Tests failed: {validation.get('tests_failed', 0)}")
+                        if validation.get('score', 0.0) == 1.0:
+                            print(f"🎉 ALL TESTS PASSED!")
+                        print(f"{'='*60}\n")
+                    else:
+                        result_entry["status"] = "no_patch"
+                        result_entry["score"] = 0.0
+                        result_entry["error"] = conversation_result.get("error", "No patch extracted")
+
+                except Exception as e:
+                    result_entry["status"] = "error"
                     result_entry["score"] = 0.0
-                    result_entry["error"] = conversation_result.get("error", "No patch extracted")
+                    result_entry["error"] = str(e)
 
-            except Exception as e:
-                result_entry["status"] = "error"
-                result_entry["score"] = 0.0
-                result_entry["error"] = str(e)
+                # Track best result across attempts
+                current_score = result_entry.get("score", 0.0)
+                if current_score > best_score:
+                    best_score = current_score
+                    best_result = result_entry.copy()
 
-            results.append(result_entry)
+                # If we achieved perfect score, no need to try again
+                if current_score == 1.0:
+                    print(f"[{task.instance_id}] Resolved on attempt {attempt}, skipping remaining attempts")
+                    break
+
+                # Reset messenger context for next attempt
+                self.messenger.reset()
+
+            # Use the best result from all attempts
+            if best_result:
+                best_result["total_attempts"] = attempt
+                results.append(best_result)
 
             # Reset messenger context for next task
             self.messenger.reset()
@@ -690,12 +734,25 @@ class Agent:
             if r["status"] == "validated"
         )
 
+        # Resolve Rate: count of instances where ALL tests pass (score == 1.0)
+        # An instance is "resolved" if both fail_to_pass and pass_to_pass tests all pass
+        resolved = sum(1 for r in results if r.get("score", 0.0) == 1.0)
+        total_instances = len(results)
+        resolve_rate = resolved / total_instances if total_instances > 0 else 0.0
+
+        # Total bash stdout characters sent to solver (proxy for token usage)
+        total_bash_stdout_chars = sum(r.get("bash_stdout_chars", 0) for r in results)
+        avg_bash_stdout_chars = total_bash_stdout_chars / len(results) if results else 0
+
+        pass_at_k = f"pass@{max_attempts}"
         summary_text = (
-            f"Evaluation complete:\n"
+            f"Evaluation complete ({pass_at_k}):\n"
             f"- Tasks: {len(results)} total, {validated} validated, {no_patch} no patch, {errors} errors\n"
             f"- Tests: {tests_passed} passed, {tests_failed} failed\n"
             f"- Average score: {avg_score:.2%}\n"
-            f"- Average turns: {avg_turns:.1f}"
+            f"- Resolve rate ({pass_at_k}): {resolve_rate:.2%} ({resolved}/{total_instances} instances fully resolved)\n"
+            f"- Average turns: {avg_turns:.1f}\n"
+            f"- Bash stdout chars: {total_bash_stdout_chars:,} total ({avg_bash_stdout_chars:,.0f} avg per task)"
         )
 
         # Print final summary to console
@@ -721,6 +778,11 @@ class Agent:
                             "tests_failed": tests_failed,
                             "average_score": avg_score,
                             "average_turns": avg_turns,
+                            "resolved": resolved,
+                            "resolve_rate": resolve_rate,
+                            "max_attempts": max_attempts,
+                            "total_bash_stdout_chars": total_bash_stdout_chars,
+                            "avg_bash_stdout_chars": avg_bash_stdout_chars,
                             "results": results,
                         }
                     )
