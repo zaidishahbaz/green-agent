@@ -1,3 +1,186 @@
+# AgentSWE  
+**Agentifying SWE-bench-Verified**
+
+---
+
+## Overview
+
+**AgentSWE** is a multi-agent re-architecture of **SWE-bench-Verified** that evaluates *software bug-fixing ability* using **Agent-to-Agent (A2A)** communication, while deliberately avoiding model-specific tool dependencies.
+
+The core idea is simple:
+
+> Measure **bug-fixing skill**, not **tool fluency**.
+
+AgentSWE cleanly separates responsibilities between agents and constrains interaction to well-defined execution modes, enabling fairer, more interpretable evaluation of autonomous software engineering agents.
+
+---
+
+## Architecture Overview
+
+<!-- TODO: Insert high-level AgentSWE architecture diagram -->
+<!-- Example: docs/images/agent_swe_architecture.png -->
+
+![AgentSWE Architecture](docs/images/agent_swe_architecture.png)
+
+*Figure 1: High-level architecture showing Green and Purple agents communicating via A2A artifacts.*
+
+---
+
+## SWEAgent at a Glance
+
+AgentSWE is built around three core principles:
+
+- **Clean Separation of Concerns**
+- **Three Interactive Execution Modes**
+- **No Extra / Custom Tools Required**
+
+We additionally introduce **token efficiency** as a first-class evaluation signal alongside resolution accuracy.
+
+---
+
+## Agent Roles & Responsibilities
+
+<!-- TODO: Insert Green ↔ Purple agent interaction flow diagram -->
+<!-- Example: docs/images/agent_interaction_flow.png -->
+
+![Green–Purple Agent Interaction](docs/images/agent_interaction_flow.png)
+
+*Figure 2: Separation of responsibilities between Green (orchestrator) and Purple (reasoning) agents.*
+
+### Green Agent
+- Acts as the **orchestrator**
+- Sends **issue details and repository metadata** to the Purple Agent via A2A
+- Executes commands on behalf of the Purple Agent
+- Communicates exclusively via **A2A artifacts**
+
+### Purple Agent
+- Acts as the **reasoning and decision-making agent**
+- Generates:
+  - Instruction prompts
+  - Commands
+  - Patch outputs
+- Never directly mutates the repository outside controlled modes
+- Communicates results back via **A2A artifacts**
+
+This separation ensures:
+- Deterministic execution
+- Clear responsibility boundaries
+- Reproducible evaluation behavior
+
+---
+
+## Interactive Execution Modes
+
+<!-- TODO: Insert execution modes diagram (Bash / Debug / Patch) -->
+<!-- Example: docs/images/execution_modes.png -->
+
+![Execution Modes](docs/images/execution_modes.png)
+
+*Figure 3: Controlled interaction modes used by the Purple Agent.*
+
+The Purple Agent interacts with the repository through **three explicit modes**:
+
+### 1. Bash Mode (Read-Only)
+- Used for repository exploration
+- Supports standard bash and git commands
+- No filesystem mutation allowed
+
+### 2. Debug Mode (Ephemeral Writes)
+- Temporary write access for debugging
+- Executed in an **isolated copy** of the repository
+- All changes are discarded after execution
+
+### 3. Patch Mode (Final Fix)
+- Purple Agent submits a **git-style patch**
+- Patch is applied once, deterministically
+- Represents the agent’s final answer
+
+This design enforces a clean progression:
+
+> *Explore → Test → Fix*
+
+---
+
+## No Extra Tools Needed
+
+<!-- TODO: Optional comparison diagram with traditional SWE-bench harnesses -->
+<!-- Example: docs/images/no_extra_tools_comparison.png -->
+
+Existing SWE-bench harnesses often rely on **custom tools** (search APIs, repo-specific helpers, etc.), which tightly couple benchmark performance to a model’s ability to use those tools.
+
+AgentSWE removes this dependency.
+
+- No custom search tools
+- No bespoke file inspection APIs
+- Only **standard bash and git commands**
+
+As a result:
+- Models are evaluated on **software reasoning**, not tool mastery
+- Results are more comparable across agents
+- Benchmark behavior is easier to interpret and reproduce
+
+---
+
+## Evaluation Metrics
+
+<!-- TODO: Insert metrics overview diagram -->
+<!-- Example: docs/images/metrics_overview.png -->
+
+![Evaluation Metrics](docs/images/metrics_overview.png)
+
+*Figure 4: Effectiveness vs efficiency metrics tracked in AgentSWE.*
+
+AgentSWE tracks both **effectiveness** and **efficiency**.
+
+### Existing Metrics (from SWE-bench-Verified)
+- **Resolved Rate**
+  - pass@1
+  - pass@3
+
+### New Metric Introduced by AgentSWE
+- **# Tokens Requested**
+  - Total tokens requested by the Purple Agent
+  - Includes tokens used in:
+    - Bash mode
+    - Debug mode
+
+A *preferred* agent is one that:
+- Resolves more issues
+- Uses fewer tokens to do so
+
+This captures the trade-off between **reasoning quality** and **computational efficiency**.
+
+---
+
+## Why AgentSWE
+
+AgentSWE provides:
+
+- A cleaner abstraction for autonomous SWE agents
+- A tool-agnostic benchmark design
+- Better signals for real-world agent usefulness
+- A natural fit for **A2A-based multi-agent systems**
+
+It reframes SWE-bench-Verified from a *tool-centric* benchmark into an **agent-centric** one.
+
+---
+
+## License
+
+This project is licensed under the **MIT License**.  
+See the [`LICENSE`](LICENSE) file for details.
+
+---
+
+
+## Attribution
+
+If you use or build on this work, please attribute:
+
+**AgentSWE – Agentifying SWE-bench-Verified**  
+
+
+
 # A2A Agent Template
 
 A minimal template for building [A2A (Agent-to-Agent)](https://a2a-protocol.org/latest/) green agents compatible with the [AgentBeats](https://agentbeats.dev) platform.
