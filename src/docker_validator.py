@@ -274,7 +274,6 @@ class DockerValidator:
         ]
 
         try:
-            breakpoint()
             result = subprocess.run(
                 cmd,
                 input=json.dumps(task_input),

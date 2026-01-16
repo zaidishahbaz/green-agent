@@ -540,7 +540,6 @@ class ContainerExecutor:
                 self.fail_to_pass_results = self._run_tests(
                     task.fail_to_pass, repo_dir, timeout_per_test
                 )
-                breakpoint()
 
             if task.pass_to_pass:
                 print(
