@@ -40,10 +40,8 @@ We additionally introduce **token efficiency** as a first-class evaluation signa
 
 ## Agent Roles & Responsibilities
 
-<!-- TODO: Insert Green ↔ Purple agent interaction flow diagram -->
-<!-- Example: docs/images/agent_interaction_flow.png -->
 
-![Green–Purple Agent Interaction](docs/images/agent_interaction_flow.png)
+![Green–Purple Agent Interaction](docs/images/agentswe_architecture.png)
 
 *Figure 2: Separation of responsibilities between Green (orchestrator) and Purple (reasoning) agents.*
 
@@ -71,10 +69,8 @@ This separation ensures:
 
 ## Interactive Execution Modes
 
-<!-- TODO: Insert execution modes diagram (Bash / Debug / Patch) -->
-<!-- Example: docs/images/execution_modes.png -->
 
-![Execution Modes](docs/images/execution_modes.png)
+![Execution Modes](docs/images/agent_interaction_flow.png)
 
 *Figure 3: Controlled interaction modes used by the Purple Agent.*
 
