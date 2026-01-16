@@ -1091,6 +1091,12 @@ class ContainerExecutor:
             )
 
         # Try to apply patch with multiple fallback strategies
+        # First, check if patch can be applied (dry run)
+        check_result = self._exec_in_container(
+            f"cd {REPO_ROOT} && git apply --check {patch_file} 2>&1",
+            timeout=60,
+        )
+
         apply_result = self._exec_in_container(
             f"cd {REPO_ROOT} && git apply --whitespace=fix --verbose {patch_file}",
             timeout=60,
@@ -1109,6 +1115,10 @@ class ContainerExecutor:
                 f"cd {REPO_ROOT} && patch -p1 --ignore-whitespace < {patch_file}",
                 timeout=60,
             )
+
+        # If still failing, include the dry-run check output for better error message
+        if not apply_result.success and not apply_result.stderr and check_result.stdout:
+            apply_result.stderr = check_result.stdout
 
         # Clean up patch file
         self._exec_in_container(f"rm -f {patch_file}", timeout=10)
