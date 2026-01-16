@@ -14,7 +14,7 @@ cwd = "../.."  # green-agent root
 [participants.solver]
 url = "http://localhost:9010"
 command = "uv run python src/server.py --host 127.0.0.1 --port 9010"
-cwd = "/Users/soumyabatra/Documents/purple-swebench"
+cwd = "/Users/zaidishahbaz/Desktop/side/agentsbeat/purple-swebench"
 
 [config]
 # Evaluation configuration passed to the green agent
