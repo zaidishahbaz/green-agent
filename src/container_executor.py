@@ -351,7 +351,13 @@ class ContainerExecutor:
         version = self.task.version if self.task else ""
         test_cmd = get_individual_test_command(repo, version, test_name, python)
 
-        return self._exec_in_container(test_cmd, cwd=repo_dir, timeout=timeout)
+        print(f"[Test] Running: {test_cmd}")
+        result = self._exec_in_container(test_cmd, cwd=repo_dir, timeout=timeout)
+        status = "PASSED" if result.success else "FAILED"
+        print(f"[Test] {test_name}: {status}")
+        if not result.success and result.stderr:
+            print(f"[Test] Error: {result.stderr[:500]}")
+        return result
 
     def _run_tests(
         self, tests: list[str], repo_dir: Path, timeout_per_test: int = 60
