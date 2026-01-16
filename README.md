@@ -21,7 +21,9 @@
 ---
 
 ## SWEAgent at a Glance
+
 ![Architecture diagram](docs/images/agentswe_architecture.png)
+
 ### Core Design Principles
 
 | Principle | Description |
