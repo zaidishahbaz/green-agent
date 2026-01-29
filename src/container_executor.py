@@ -9,7 +9,6 @@ This module manages persistent Docker containers for SWE-bench task execution:
 - Returns structured output {cwd, stdout, stderr}
 """
 
-import json
 import subprocess
 import uuid
 import os
@@ -21,6 +20,7 @@ import re
 
 from swebench import SWEBenchTask
 from docker_validator import get_python_version
+from test_utils import get_individual_test_command
 
 
 # Container configuration
@@ -93,124 +93,6 @@ def get_test_command(repo: str, version: str) -> str:
 
     # Fallback
     return "pytest -rA"
-
-
-def convert_unittest_to_django(test_name: str) -> str:
-    """Convert unittest-style test name to Django runtests.py format.
-
-    Input:  "test_method (module.ClassName)"
-    Output: "module.ClassName.test_method"
-    """
-    match = re.match(r'(\w+)\s+\(([^)]+)\)', test_name)
-    if match:
-        method, path = match.groups()
-        return f"{path}.{method}"
-    return test_name
-
-
-def convert_unittest_to_pytest(test_name: str) -> str:
-    """Convert unittest-style test name to pytest format.
-
-    Input:  "test_method (module.ClassName)"
-    Output: "module.py::ClassName::test_method"
-    """
-    match = re.match(r'(\w+)\s+\(([^)]+)\)', test_name)
-    if match:
-        method, path = match.groups()
-        parts = path.rsplit('.', 1)
-        if len(parts) == 2:
-            module, classname = parts
-            # Convert module path to file path
-            filepath = module.replace('.', '/') + '.py'
-            return f"{filepath}::{classname}::{method}"
-    return test_name
-
-
-def is_simple_test_name(test_name: str) -> bool:
-    """Check if test name is just a function name (no path info)."""
-    # Simple test names: test_foo, test_bar_baz
-    return bool(re.match(r'^test_\w+$', test_name))
-
-
-def get_individual_test_command(repo: str, version: str, test_name: str, python_bin: str = "python") -> str:
-    """
-    Get the command to run a specific individual test for a repo.
-
-    Args:
-        repo: Repository name (e.g., "django/django")
-        version: Version string (e.g., "3.0")
-        test_name: Test identifier from SWE-bench
-        python_bin: Python binary path (default: "python")
-
-    Returns:
-        Full command string to run the test
-    """
-    if repo == "django/django":
-        # Django uses tests/runtests.py with a specific format
-        django_test = convert_unittest_to_django(test_name)
-        try:
-            ver = float(version)
-        except (ValueError, TypeError):
-            ver = 0.0
-        if ver == 1.9:
-            return f"{python_bin} tests/runtests.py {django_test} -v 2"
-        else:
-            return f"{python_bin} tests/runtests.py --settings=test_sqlite --parallel 1 {django_test} -v 2"
-
-    elif repo == "sympy/sympy":
-        # SymPy uses bin/test with specific flags
-        # Test names are usually like "sympy/core/tests/test_basic.py"
-        return f"PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' bin/test -C --verbose {test_name}"
-
-    elif repo == "sphinx-doc/sphinx":
-        # Sphinx uses tox
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"tox --current-env -epy39 -v -- {pytest_test}"
-
-    elif repo == "astropy/astropy":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -vv -o console_output_style=classic --tb=short {pytest_test}"
-
-    elif repo == "matplotlib/matplotlib":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "scikit-learn/scikit-learn":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "pallets/flask":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "pydata/xarray":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "pytest-dev/pytest":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "psf/requests":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "pylint-dev/pylint":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "mwaskom/seaborn":
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest --no-header -rA -xvs --tb=short {pytest_test}"
-
-    # Default: use pytest with smart test name handling
-    if is_simple_test_name(test_name):
-        # Simple test name like "test_foo" - use -k for keyword match
-        return f"{python_bin} -m pytest -k {test_name} -xvs --tb=short"
-    else:
-        # Try to convert to pytest format
-        pytest_test = convert_unittest_to_pytest(test_name)
-        return f"{python_bin} -m pytest {pytest_test} -xvs --tb=short"
 
 
 @dataclass
@@ -1169,6 +1051,7 @@ class ContainerExecutor:
 
         try:
             # Step 1: Create a temporary image from current container state
+            print(f"[Debug] Creating snapshot from container {self.container_id}")
             temp_image = f"debug-snapshot-{uuid.uuid4().hex[:8]}"
             commit_result = subprocess.run(
                 ["docker", "commit", self.container_id, temp_image],
@@ -1177,6 +1060,7 @@ class ContainerExecutor:
                 timeout=60,
             )
             if commit_result.returncode != 0:
+                print(f"[Debug] Snapshot creation failed: {commit_result.stderr}")
                 return BashResult(
                     cwd=self.cwd,
                     stdout="",
@@ -1184,8 +1068,10 @@ class ContainerExecutor:
                     success=False,
                     error="Debug snapshot failed",
                 )
+            print(f"[Debug] Snapshot created: {temp_image}")
 
             # Step 2: Start a temporary container from the snapshot
+            print(f"[Debug] Starting temp container from snapshot...")
             run_result = subprocess.run(
                 [
                     "docker",
@@ -1205,6 +1091,7 @@ class ContainerExecutor:
                 timeout=30,
             )
             if run_result.returncode != 0:
+                print(f"[Debug] Temp container start failed: {run_result.stderr}")
                 return BashResult(
                     cwd=self.cwd,
                     stdout="",
@@ -1213,8 +1100,10 @@ class ContainerExecutor:
                     error="Debug container failed",
                 )
             temp_container = run_result.stdout.strip()
+            print(f"[Debug] Temp container started: {temp_container}")
 
             # Step 3: Enable write permissions (except test files)
+            print(f"[Debug] Enabling write permissions in temp container...")
             subprocess.run(
                 ["docker", "exec", temp_container, "chmod", "-R", "u+w", REPO_ROOT],
                 capture_output=True,
@@ -1237,6 +1126,7 @@ class ContainerExecutor:
                 )
 
             # Step 4: Execute the command (with write access to source files)
+            print(f"[Debug] Executing command in temp container: {command[:100]}...")
             exec_result = subprocess.run(
                 [
                     "docker",
@@ -1252,6 +1142,7 @@ class ContainerExecutor:
                 text=True,
                 timeout=timeout,
             )
+            print(f"[Debug] Command completed with return code: {exec_result.returncode}")
 
             return BashResult(
                 cwd=self.cwd,
@@ -1261,6 +1152,7 @@ class ContainerExecutor:
             )
 
         except subprocess.TimeoutExpired:
+            print(f"[Debug] Command timed out after {timeout}s")
             return BashResult(
                 cwd=self.cwd,
                 stdout="",
@@ -1269,11 +1161,13 @@ class ContainerExecutor:
                 error="Timeout",
             )
         except Exception as e:
+            print(f"[Debug] Exception occurred: {e}")
             return BashResult(
                 cwd=self.cwd, stdout="", stderr=str(e), success=False, error=str(e)
             )
         finally:
             # Step 5: Cleanup - destroy temp container and image
+            print(f"[Debug] Cleaning up temp container and image...")
             if temp_container:
                 subprocess.run(
                     ["docker", "rm", "-f", temp_container],
@@ -1284,6 +1178,7 @@ class ContainerExecutor:
                 subprocess.run(
                     ["docker", "rmi", "-f", temp_image], capture_output=True, timeout=30
                 )
+            print(f"[Debug] Cleanup complete")
 
     async def stop(self):
         """Stop and remove the container."""

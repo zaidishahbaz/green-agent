@@ -138,20 +138,23 @@ class Agent:
         return True, "ok"
 
     def get_tasks(self, config: dict[str, Any]) -> list[SWEBenchTask]:
-        """Get tasks based on config filters."""
-        # If specific instance_id requested, return just that task
+        """Get tasks based on config filters (AND logic)."""
+        # instance_id is exclusive - returns only that task
         if instance_id := config.get("instance_id"):
             task = self.dataset.get_task_by_id(instance_id)
             return [task] if task else []
 
-        # If specific repo requested, filter by repo
+        # Start with all tasks
+        tasks = list(self.dataset.iter_tasks())
+
+        # Apply repo filter (AND)
         if repo := config.get("repo"):
-            tasks = self.dataset.get_tasks_by_repo(repo)
-        # If difficulty filter
-        elif difficulty := config.get("difficulty"):
-            tasks = self.dataset.get_tasks_by_difficulty(difficulty)
-        else:
-            tasks = list(self.dataset.iter_tasks())
+            tasks = [t for t in tasks if t.repo == repo]
+
+        # Apply difficulty filter (AND)
+        if difficulty := config.get("difficulty"):
+            difficulty_ids = {t.instance_id for t in self.dataset.get_tasks_by_difficulty(difficulty)}
+            tasks = [t for t in tasks if t.instance_id in difficulty_ids]
 
         # Apply max_tasks limit
         max_tasks = config.get("max_tasks", 1)
@@ -628,6 +631,7 @@ class Agent:
         for i, task in enumerate(tasks):
             best_result = None
             best_score = -1.0
+            best_attempt = 0  # Track which attempt achieved the best score
 
             # Run up to max_attempts for pass@k evaluation
             for attempt in range(1, max_attempts + 1):
@@ -664,7 +668,21 @@ class Agent:
 
                     patch = conversation_result["patch"]
                     validation = conversation_result.get("validation")
-                    print(f"[{task.instance_id}] Extracted patch after {conversation_result['turns']} turns")
+                    error = conversation_result.get("error")
+
+                    # Conditional messaging based on success/failure
+                    if patch and validation:
+                        score = validation.get("score", 0.0)
+                        if score == 1.0:
+                            print(f"[{task.instance_id}] Successfully resolved after {conversation_result['turns']} turns")
+                        else:
+                            print(f"[{task.instance_id}] Patch applied (score: {score:.1%}) after {conversation_result['turns']} turns")
+                    elif patch:
+                        print(f"[{task.instance_id}] Patch extracted but validation failed after {conversation_result['turns']} turns")
+                    elif error:
+                        print(f"[{task.instance_id}] Failed after {conversation_result['turns']} turns: {error}")
+                    else:
+                        print(f"[{task.instance_id}] No patch extracted after {conversation_result['turns']} turns")
 
                     if patch and validation:
                         # Validation was done inside run_multi_turn_conversation
@@ -697,6 +715,7 @@ class Agent:
                 if current_score > best_score:
                     best_score = current_score
                     best_result = result_entry.copy()
+                    best_attempt = attempt  # Track which attempt was best
 
                 # If we achieved perfect score, no need to try again
                 if current_score == 1.0:
@@ -708,7 +727,8 @@ class Agent:
 
             # Use the best result from all attempts
             if best_result:
-                best_result["total_attempts"] = attempt
+                best_result["total_attempts"] = attempt  # Total attempts made
+                best_result["best_attempt"] = best_attempt  # Which attempt was best
                 results.append(best_result)
 
             # Reset messenger context for next task
@@ -752,7 +772,7 @@ class Agent:
             f"- Average score: {avg_score:.2%}\n"
             f"- Resolve rate ({pass_at_k}): {resolve_rate:.2%} ({resolved}/{total_instances} instances fully resolved)\n"
             f"- Average turns: {avg_turns:.1f}\n"
-            f"- Bash stdout chars: {total_bash_stdout_chars:,} total ({avg_bash_stdout_chars:,.0f} avg per task)"
+            f"- Avg bash stdout chars per task: {avg_bash_stdout_chars:,.0f}"
         )
 
         # Print final summary to console
@@ -781,7 +801,6 @@ class Agent:
                             "resolved": resolved,
                             "resolve_rate": resolve_rate,
                             "max_attempts": max_attempts,
-                            "total_bash_stdout_chars": total_bash_stdout_chars,
                             "avg_bash_stdout_chars": avg_bash_stdout_chars,
                             "results": results,
                         }
