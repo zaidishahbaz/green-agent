@@ -1,9 +1,10 @@
 """Docker-based validator for running SWE-bench tests in existing containers."""
 
 import subprocess
-import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+from test_utils import get_individual_test_command
 
 # Container configuration
 REPO_ROOT = "/workspace/repo"
@@ -95,78 +96,6 @@ def get_debian_version(python_version: str) -> str:
         return "bullseye"
     else:
         return "bookworm"
-
-
-def _convert_unittest_to_django(test_name: str) -> str:
-    """Convert unittest-style test name to Django runtests.py format."""
-    match = re.match(r'(\w+)\s+\(([^)]+)\)', test_name)
-    if match:
-        method, path = match.groups()
-        return f"{path}.{method}"
-    return test_name
-
-
-def _convert_unittest_to_pytest(test_name: str) -> str:
-    """Convert unittest-style test name to pytest format."""
-    match = re.match(r'(\w+)\s+\(([^)]+)\)', test_name)
-    if match:
-        method, path = match.groups()
-        parts = path.rsplit('.', 1)
-        if len(parts) == 2:
-            module, classname = parts
-            filepath = module.replace('.', '/') + '.py'
-            return f"{filepath}::{classname}::{method}"
-    return test_name
-
-
-def _is_simple_test_name(test_name: str) -> bool:
-    """Check if test name is just a function name (no path info)."""
-    return bool(re.match(r'^test_\w+$', test_name))
-
-
-def get_individual_test_command(repo: str, version: str, test_name: str) -> str:
-    """
-    Get the command to run a specific individual test for a repo.
-    Based on official SWE-bench harness specifications.
-    """
-    try:
-        ver = float(version) if version else 0.0
-    except (ValueError, TypeError):
-        ver = 0.0
-
-    if repo == "django/django":
-        django_test = _convert_unittest_to_django(test_name)
-        if ver == 1.9:
-            return f"python tests/runtests.py {django_test} -v 2"
-        else:
-            return f"python tests/runtests.py --settings=test_sqlite --parallel 1 {django_test} -v 2"
-
-    elif repo == "sympy/sympy":
-        return f"PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' bin/test -C --verbose {test_name}"
-
-    elif repo == "sphinx-doc/sphinx":
-        pytest_test = _convert_unittest_to_pytest(test_name)
-        return f"tox --current-env -epy39 -v -- {pytest_test}"
-
-    elif repo == "astropy/astropy":
-        pytest_test = _convert_unittest_to_pytest(test_name)
-        return f"python -m pytest -rA -vv -o console_output_style=classic --tb=short {pytest_test}"
-
-    elif repo in ("matplotlib/matplotlib", "scikit-learn/scikit-learn", "pallets/flask",
-                  "pydata/xarray", "pytest-dev/pytest", "psf/requests", "pylint-dev/pylint"):
-        pytest_test = _convert_unittest_to_pytest(test_name)
-        return f"python -m pytest -rA -xvs --tb=short {pytest_test}"
-
-    elif repo == "mwaskom/seaborn":
-        pytest_test = _convert_unittest_to_pytest(test_name)
-        return f"python -m pytest --no-header -rA -xvs --tb=short {pytest_test}"
-
-    # Default: use pytest with smart test name handling
-    if _is_simple_test_name(test_name):
-        return f"python -m pytest -k {test_name} -xvs --tb=short"
-    else:
-        pytest_test = _convert_unittest_to_pytest(test_name)
-        return f"python -m pytest {pytest_test} -xvs --tb=short"
 
 
 @dataclass
