@@ -157,7 +157,7 @@ class Agent:
             tasks = [t for t in tasks if t.instance_id in difficulty_ids]
 
         # Apply max_tasks limit
-        max_tasks = config.get("max_tasks", 1)
+        max_tasks = config.get("max_tasks", 1000) # get all by default
         return tasks[:max_tasks]
 
     def extract_patch(self, solver_response: str) -> str | None:
@@ -864,8 +864,8 @@ class Agent:
             f"- Average Best-of-{max_attempts} Score: {avg_score:.2%}\n"
             f"- Resolve Rate (pass@1): {resolve_rate:.2%} ({resolved}/{total_instances} instances fully resolved)\n"
             f"- Pass@k metrics: {pass_at_k_str}\n"
-            f"- Average turns: {avg_turns:.1f}\n"
-            f"- Avg bash stdout chars per task: {avg_bash_stdout_chars:,.0f}"
+            f"- Average Best-of-{max_attempts} turns: {avg_turns:.1f}\n"
+            f"- Avg Best-of-{max_attempts} bash stdout chars per task: {avg_bash_stdout_chars:,.0f}"
         )
 
         # Print final summary to console
