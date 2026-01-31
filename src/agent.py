@@ -157,7 +157,7 @@ class Agent:
             tasks = [t for t in tasks if t.instance_id in difficulty_ids]
 
         # Apply max_tasks limit
-        max_tasks = config.get("max_tasks", 1)
+        max_tasks = config.get("max_tasks", 1000) # get all by default
         return tasks[:max_tasks]
 
     def extract_patch(self, solver_response: str) -> str | None:
