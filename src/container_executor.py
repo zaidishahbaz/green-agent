@@ -137,6 +137,31 @@ class ContainerExecutor:
         self.python_version = "3.9"
         self._started = False
         self.protected_test_files: list[str] = []
+        # Before-patch test results (baseline)
+        self.fail_to_pass_results: dict[str, BashResult] = {}
+        self.pass_to_pass_results: dict[str, BashResult] = {}
+
+    def get_before_patch_metrics(self) -> dict:
+        """
+        Get the before-patch test metrics (counts only).
+
+        Returns dict with:
+        - before_f2p_passed: Number of fail_to_pass tests that passed before patch
+        - before_f2p_total: Total number of fail_to_pass tests
+        - before_p2p_passed: Number of pass_to_pass tests that passed before patch
+        - before_p2p_total: Total number of pass_to_pass tests
+        """
+        f2p_passed = sum(1 for r in self.fail_to_pass_results.values() if r.success)
+        f2p_total = len(self.fail_to_pass_results)
+        p2p_passed = sum(1 for r in self.pass_to_pass_results.values() if r.success)
+        p2p_total = len(self.pass_to_pass_results)
+
+        return {
+            "before_f2p_passed": f2p_passed,
+            "before_f2p_total": f2p_total,
+            "before_p2p_passed": p2p_passed,
+            "before_p2p_total": p2p_total,
+        }
 
     @staticmethod
     def _extract_files_from_patch(patch: str) -> list[str]:
@@ -171,6 +196,7 @@ class ContainerExecutor:
         result = subprocess.run(
             ["docker", "image", "inspect", f"{self.image_name}:{self.python_version}"],
             capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             return True, ""

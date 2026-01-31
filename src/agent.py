@@ -207,6 +207,12 @@ class Agent:
 
         The patch should already be applied in self.container.
         This just runs the tests - no cloning, installing, or re-patching.
+
+        Returns validation results with before/after metrics for detailed analysis:
+        - before_f2p_passed/total: fail_to_pass tests before patch (should mostly fail)
+        - before_p2p_passed/total: pass_to_pass tests before patch (should mostly pass)
+        - after_f2p_passed/total: fail_to_pass tests after patch (should all pass for score=1.0)
+        - after_p2p_passed/total: pass_to_pass tests after patch (should all pass for no regression)
         """
         if not self.container or not self.container.container_id:
             return {
@@ -224,10 +230,14 @@ class Agent:
             new_agent_text_message(f"Validating patch for {task.instance_id}..."),
         )
 
+        # Get before-patch metrics from container (baseline recorded during setup)
+        before_metrics = self.container.get_before_patch_metrics()
+
         # Create validator with the existing container
         validator = DockerValidator(container_id=self.container.container_id)
         result = validator.validate_task(task)
 
+        # Build validation result with before/after metrics (counts only, no verbose details)
         return {
             "patch_applied": result.patch_applied,
             "install_success": result.install_success,
@@ -236,6 +246,19 @@ class Agent:
             "score": result.score,
             "errors": result.errors,
             "test_details": result.test_results,
+            # Before-patch metrics (baseline)
+            "before_f2p_passed": before_metrics["before_f2p_passed"],
+            "before_f2p_total": before_metrics["before_f2p_total"],
+            "before_p2p_passed": before_metrics["before_p2p_passed"],
+            "before_p2p_total": before_metrics["before_p2p_total"],
+            # After-patch metrics (from validator)
+            "after_f2p_passed": result.summary.get("fail_to_pass_passed", 0),
+            "after_f2p_total": result.summary.get("fail_to_pass_total", 0),
+            "after_p2p_passed": result.summary.get("pass_to_pass_passed", 0),
+            "after_p2p_total": result.summary.get("pass_to_pass_total", 0),
+            # Computed delta metrics
+            "f2p_fixed": result.summary.get("fail_to_pass_passed", 0) - before_metrics["before_f2p_passed"],
+            "p2p_regressed": before_metrics["before_p2p_passed"] - result.summary.get("pass_to_pass_passed", 0),
         }
 
     def _format_bash_result(self, result: BashResult) -> dict:
@@ -771,6 +794,60 @@ class Agent:
             if r["status"] == "validated"
         )
 
+        # Aggregate before/after F2P/P2P metrics across all validated results
+        before_f2p_passed = sum(
+            r.get("validation", {}).get("before_f2p_passed", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        before_f2p_total = sum(
+            r.get("validation", {}).get("before_f2p_total", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        before_p2p_passed = sum(
+            r.get("validation", {}).get("before_p2p_passed", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        before_p2p_total = sum(
+            r.get("validation", {}).get("before_p2p_total", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        after_f2p_passed = sum(
+            r.get("validation", {}).get("after_f2p_passed", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        after_f2p_total = sum(
+            r.get("validation", {}).get("after_f2p_total", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        after_p2p_passed = sum(
+            r.get("validation", {}).get("after_p2p_passed", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        after_p2p_total = sum(
+            r.get("validation", {}).get("after_p2p_total", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+
+        # Compute aggregate delta metrics
+        total_f2p_fixed = sum(
+            r.get("validation", {}).get("f2p_fixed", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+        total_p2p_regressed = sum(
+            r.get("validation", {}).get("p2p_regressed", 0)
+            for r in best_results
+            if r["status"] == "validated"
+        )
+
         # Total bash stdout characters sent to solver (proxy for token usage)
         total_bash_stdout_chars = sum(r.get("bash_stdout_chars", 0) for r in best_results)
         avg_bash_stdout_chars = total_bash_stdout_chars / len(results) if best_results else 0
@@ -781,6 +858,9 @@ class Agent:
             f"Evaluation complete (pass@{max_attempts}):\n"
             f"- Tasks: {len(best_results)} total, {validated} validated, {no_patch} no patch, {errors} errors\n"
             f"- Tests: {tests_passed} passed, {tests_failed} failed\n"
+            f"- Before Patch: F2P {before_f2p_passed}/{before_f2p_total}, P2P {before_p2p_passed}/{before_p2p_total}\n"
+            f"- After Patch:  F2P {after_f2p_passed}/{after_f2p_total}, P2P {after_p2p_passed}/{after_p2p_total}\n"
+            f"- Delta: {total_f2p_fixed} F2P fixed, {total_p2p_regressed} P2P regressed\n"
             f"- Average Best-of-{max_attempts} Score: {avg_score:.2%}\n"
             f"- Resolve Rate (pass@1): {resolve_rate:.2%} ({resolved}/{total_instances} instances fully resolved)\n"
             f"- Pass@k metrics: {pass_at_k_str}\n"
@@ -809,6 +889,17 @@ class Agent:
                             "errors": errors,
                             "tests_passed": tests_passed,
                             "tests_failed": tests_failed,
+                            # Before/After F2P/P2P metrics (aggregate)
+                            "before_f2p_passed": before_f2p_passed,
+                            "before_f2p_total": before_f2p_total,
+                            "before_p2p_passed": before_p2p_passed,
+                            "before_p2p_total": before_p2p_total,
+                            "after_f2p_passed": after_f2p_passed,
+                            "after_f2p_total": after_f2p_total,
+                            "after_p2p_passed": after_p2p_passed,
+                            "after_p2p_total": after_p2p_total,
+                            "f2p_fixed": total_f2p_fixed,
+                            "p2p_regressed": total_p2p_regressed,
                             "average_best_of_k_score": avg_score,
                             "average_turns": avg_turns,
                             "resolved": resolved,
