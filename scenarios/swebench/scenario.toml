@@ -20,8 +20,9 @@ cwd = "/Users/soumyabatra/Documents/purple-swebench"
 # Evaluation configuration passed to the green agent
 #max_tasks = 1
 #repo = "astropy/astropy"
-instance_id = "sympy__sympy-20916"
-max_attempts = 3                         # specify max k for pass@k
+instance_id = "pylint-dev__pylint-4661" #"sympy__sympy-20916" #"pylint-dev__pylint-4661" 
+max_turns = 10                           # default = 10
+max_attempts = 3                        # specify max k for pass@k, default k = 1
 # Optional filters:
 # repo = "django/django"                 # Filter by repo
 # difficulty = "easy"                    # Filter by difficulty

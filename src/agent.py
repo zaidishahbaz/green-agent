@@ -784,8 +784,8 @@ class Agent:
             f"- Average Best-of-{max_attempts} Score: {avg_score:.2%}\n"
             f"- Resolve Rate (pass@1): {resolve_rate:.2%} ({resolved}/{total_instances} instances fully resolved)\n"
             f"- Pass@k metrics: {pass_at_k_str}\n"
-            f"- Average turns: {avg_turns:.1f}\n"
-            f"- Avg bash stdout chars per task: {avg_bash_stdout_chars:,.0f}"
+            f"- Average Best-of-{max_attempts} turns: {avg_turns:.1f}\n"
+            f"- Avg Best-of-{max_attempts} bash stdout chars per task: {avg_bash_stdout_chars:,.0f}"
         )
 
         # Print final summary to console
