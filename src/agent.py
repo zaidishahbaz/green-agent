@@ -189,6 +189,16 @@ class Agent:
             return match.group(1).strip()
 
         return None
+    
+    # Helper function to calculate pass@k
+    def calculate_pass_at_k(self, results_by_instances, k):
+        """Check if at least one of first k attempts succeeded (score == 1.0)"""
+        passed = 0
+        for _, attempts in results_by_instances.items():
+            attempts_sorted = sorted(attempts, key=lambda x: x["attempt"])
+            if any(att.get("score", 0.0) == 1.0 for att in attempts_sorted[:k]):
+                passed += 1
+        return passed / len(results_by_instances) if results_by_instances else 0.0
 
     async def validate_patch(
         self, task: SWEBenchTask, updater: TaskUpdater
@@ -629,9 +639,6 @@ class Agent:
         results = []
 
         for i, task in enumerate(tasks):
-            best_result = None
-            best_score = -1.0
-            best_attempt = 0  # Track which attempt achieved the best score
 
             # Run up to max_attempts for pass@k evaluation
             for attempt in range(1, max_attempts + 1):
@@ -710,67 +717,73 @@ class Agent:
                     result_entry["score"] = 0.0
                     result_entry["error"] = str(e)
 
-                # Track best result across attempts
-                current_score = result_entry.get("score", 0.0)
-                if current_score > best_score:
-                    best_score = current_score
-                    best_result = result_entry.copy()
-                    best_attempt = attempt  # Track which attempt was best
-
-                # If we achieved perfect score, no need to try again
-                if current_score == 1.0:
-                    print(f"[{task.instance_id}] Resolved on attempt {attempt}, skipping remaining attempts")
-                    break
+                # Store all independent attempts for pass@k
+                results.append(result_entry)
 
                 # Reset messenger context for next attempt
                 self.messenger.reset()
 
-            # Use the best result from all attempts
-            if best_result:
-                best_result["total_attempts"] = attempt  # Total attempts made
-                best_result["best_attempt"] = best_attempt  # Which attempt was best
-                results.append(best_result)
-
             # Reset messenger context for next task
             self.messenger.reset()
 
-        # Summary
-        validated = sum(1 for r in results if r["status"] == "validated")
-        no_patch = sum(1 for r in results if r["status"] == "no_patch")
-        errors = sum(1 for r in results if r["status"] == "error")
-        total_score = sum(r.get("score", 0.0) for r in results)
-        avg_score = total_score / len(results) if results else 0.0
-        avg_turns = sum(r.get("turns", 0) for r in results) / len(results) if results else 0
+        # ============== PASS@K CALCULATION ==============       
+        # Group results by instance
+        results_by_instance = {}
+        for r in results:
+            instance_id = r["instance_id"]
+            if instance_id not in results_by_instance:
+                results_by_instance[instance_id] = []
+            results_by_instance[instance_id].append(r)
+
+        # Calculate pass@k for all k from 1 to max_attempts
+        pass_at_k_results = {}
+        for k in range(1, max_attempts + 1):
+            pass_at_k_results[f"pass@{k}"] = self.calculate_pass_at_k(results_by_instance, k)
+        
+        # pass@1 is the official resolve rate (SWE-bench metric)
+        resolve_rate = pass_at_k_results.get("pass@1", 0.0)
+        resolved = int(resolve_rate * len(results_by_instance))
+        total_instances = len(results_by_instance)
+        
+        # Get best attempt per instance for aggregate metrics
+        best_results = []
+        for instance_id, attempts in results_by_instance.items():
+            best = max(attempts, key=lambda x: x.get("score", 0.0))
+            best_results.append(best)
+        
+        # Summary stats from best results per instance
+        validated = sum(1 for r in best_results if r["status"] == "validated")
+        no_patch = sum(1 for r in best_results if r["status"] == "no_patch")
+        errors = sum(1 for r in best_results if r["status"] == "error")
+        total_score = sum(r.get("score", 0.0) for r in best_results)
+        avg_score = total_score / len(best_results) if best_results else 0.0
+        avg_turns = sum(r.get("turns", 0) for r in best_results) / len(best_results) if best_results else 0
 
         # Count tests passed across all validated results
         tests_passed = sum(
             r.get("validation", {}).get("tests_passed", 0)
-            for r in results
+            for r in best_results
             if r["status"] == "validated"
         )
         tests_failed = sum(
             r.get("validation", {}).get("tests_failed", 0)
-            for r in results
+            for r in best_results
             if r["status"] == "validated"
         )
 
-        # Resolve Rate: count of instances where ALL tests pass (score == 1.0)
-        # An instance is "resolved" if both fail_to_pass and pass_to_pass tests all pass
-        resolved = sum(1 for r in results if r.get("score", 0.0) == 1.0)
-        total_instances = len(results)
-        resolve_rate = resolved / total_instances if total_instances > 0 else 0.0
-
         # Total bash stdout characters sent to solver (proxy for token usage)
-        total_bash_stdout_chars = sum(r.get("bash_stdout_chars", 0) for r in results)
-        avg_bash_stdout_chars = total_bash_stdout_chars / len(results) if results else 0
+        total_bash_stdout_chars = sum(r.get("bash_stdout_chars", 0) for r in best_results)
+        avg_bash_stdout_chars = total_bash_stdout_chars / len(results) if best_results else 0
 
-        pass_at_k = f"pass@{max_attempts}"
+        pass_at_k_str = ", ".join([f"pass@{k}: {pass_at_k_results[f'pass@{k}']:.2%}" for k in range(1, max_attempts + 1)])
+
         summary_text = (
-            f"Evaluation complete ({pass_at_k}):\n"
-            f"- Tasks: {len(results)} total, {validated} validated, {no_patch} no patch, {errors} errors\n"
+            f"Evaluation complete (pass@{max_attempts}):\n"
+            f"- Tasks: {len(best_results)} total, {validated} validated, {no_patch} no patch, {errors} errors\n"
             f"- Tests: {tests_passed} passed, {tests_failed} failed\n"
-            f"- Average score: {avg_score:.2%}\n"
-            f"- Resolve rate ({pass_at_k}): {resolve_rate:.2%} ({resolved}/{total_instances} instances fully resolved)\n"
+            f"- Average Best-of-{max_attempts} Score: {avg_score:.2%}\n"
+            f"- Resolve Rate (pass@1): {resolve_rate:.2%} ({resolved}/{total_instances} instances fully resolved)\n"
+            f"- Pass@k metrics: {pass_at_k_str}\n"
             f"- Average turns: {avg_turns:.1f}\n"
             f"- Avg bash stdout chars per task: {avg_bash_stdout_chars:,.0f}"
         )
@@ -790,16 +803,17 @@ class Agent:
                 Part(
                     root=DataPart(
                         data={
-                            "total_tasks": len(results),
+                            "total_tasks": len(best_results),
                             "validated": validated,
                             "no_patch": no_patch,
                             "errors": errors,
                             "tests_passed": tests_passed,
                             "tests_failed": tests_failed,
-                            "average_score": avg_score,
+                            "average_best_of_k_score": avg_score,
                             "average_turns": avg_turns,
                             "resolved": resolved,
                             "resolve_rate": resolve_rate,
+                            "pass_at_k": pass_at_k_results,
                             "max_attempts": max_attempts,
                             "avg_bash_stdout_chars": avg_bash_stdout_chars,
                             "results": results,
